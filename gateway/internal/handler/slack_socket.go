@@ -129,10 +129,53 @@ func (m *SlackSocketManager) handleEventsAPI(app *config.SlackAppConfig, evtAPI 
 		if !app.Events.Reaction {
 			return
 		}
-		slog.Info("slack socket: reaction", "app", app.Name, "reaction", ev.Reaction, "user", ev.User)
+		m.handleReactionFeedback(app, ev)
 
 	default:
 		// member_joined, channel_rename, pin — handled if needed
+	}
+}
+
+// handleReactionFeedback processes emoji reactions on bot messages as feedback signals.
+// Looks up the thread registry to find which skill produced the message,
+// then logs the feedback with a Prometheus counter for accuracy tracking.
+func (m *SlackSocketManager) handleReactionFeedback(app *config.SlackAppConfig, ev *slackevents.ReactionAddedEvent) {
+	sentiment := classifyReaction(ev.Reaction)
+	if sentiment == "" {
+		return // not a feedback reaction
+	}
+
+	channel := ev.Item.Channel
+	messageTS := ev.Item.Timestamp
+
+	// Look up which skill produced this message via thread registry
+	skill := "unknown"
+	if entry := lookupThread(app.Name, channel, messageTS); entry != nil {
+		skill = entry.skill
+	}
+
+	slog.Info("slack socket: reaction feedback",
+		"app", app.Name,
+		"reaction", ev.Reaction,
+		"sentiment", sentiment,
+		"skill", skill,
+		"user", ev.User,
+		"channel", channel,
+		"message_ts", messageTS,
+	)
+
+	slackReactionFeedbackTotal.WithLabelValues(app.Name, skill, sentiment).Inc()
+}
+
+// classifyReaction maps emoji names to feedback sentiment.
+func classifyReaction(reaction string) string {
+	switch reaction {
+	case "white_check_mark", "+1", "thumbsup", "heavy_check_mark", "check":
+		return "positive"
+	case "x", "-1", "thumbsdown", "no_entry", "no_entry_sign":
+		return "negative"
+	default:
+		return ""
 	}
 }
 
@@ -186,8 +229,21 @@ func (m *SlackSocketManager) handleSocketMessage(app *config.SlackAppConfig, cha
 			removeSlackReaction(app.BotToken, channel, ts, typingReaction)
 		}
 
+		// Post result — use Block Kit if skill returned rich_output
 		var postedTS string
-		if replyTS != "" && replyTS != ts {
+		if blocks, fallback, ok := tryParseRichOutput(result); ok {
+			slog.Info("rich_output detected, posting Block Kit",
+				"app", app.Name,
+				"channel", channel,
+				"blocks_count", len(blocks),
+			)
+			// Always reply in a thread (like Pearl) — use original message as parent
+			threadParent := replyTS
+			if threadParent == "" || threadParent == ts {
+				threadParent = ts
+			}
+			postedTS, _ = postSlackBlocksWithTS(app.BotToken, channel, threadParent, fallback, blocks)
+		} else if replyTS != "" && replyTS != ts {
 			postedTS, _ = postSlackThreadReply(app.BotToken, channel, replyTS, result)
 		} else {
 			postedTS, _ = postSlackMessage(app.BotToken, channel, result)
@@ -239,9 +295,9 @@ func (m *SlackSocketManager) dispatchAndFormat(app *config.SlackAppConfig, chann
 		}
 	}
 
-	// For auto commands: if the app has a domain triage skill, let triage route.
-	// Only use command aliases for non-domain-scoped apps (no triage available).
-	if cmd.Action == "auto" && app.DomainScope == "" {
+	// For auto commands: try command aliases first (highest priority),
+	// then fall back to domain triage if no alias matches.
+	if cmd.Action == "auto" {
 		if aliasCmd := matchCommandAlias(cmd.Text, app); aliasCmd != nil {
 			cmd = *aliasCmd
 		}
