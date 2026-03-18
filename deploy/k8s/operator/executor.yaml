@@ -52,6 +52,10 @@ spec:
               value: http://k8s-mcp:8090
             - name: MCP_DATABRICKS_URL
               value: http://databricks-mcp:8092
+            - name: MCP_GMAIL_URL
+              value: http://gmail-mcp:8093
+            - name: MCP_GRANOLA_URL
+              value: http://granola-mcp:8094
             - name: AGENCY_DIR
               value: /agency
             - name: UVICORN_WORKERS

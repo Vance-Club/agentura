@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gmail-mcp
+  namespace: agentura
+  labels:
+    app: gmail-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gmail-mcp
+  template:
+    metadata:
+      labels:
+        app: gmail-mcp
+    spec:
+      containers:
+        - name: gmail-mcp
+          image: agentura/gmail-mcp:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8093
+          envFrom:
+            - secretRef:
+                name: agentura-api-keys
+                optional: true
+            - secretRef:
+                name: agentura-mcp-config
+                optional: true
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8093
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            limits:
+              memory: 128Mi
+              cpu: "250m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gmail-mcp
+  namespace: agentura
+spec:
+  selector:
+    app: gmail-mcp
+  ports:
+    - port: 8093
+      targetPort: 8093

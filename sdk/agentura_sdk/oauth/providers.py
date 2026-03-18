@@ -14,12 +14,15 @@ _logger = logging.getLogger("agentura.oauth.providers")
 
 PROVIDERS: dict[str, dict] = {
     "granola": {
-        "mcp_url": "https://mcp.granola.ai/mcp",
+        # mcp_url intentionally omitted — Granola resolves via MCP_GRANOLA_URL env var
+        # (tier 2) to our custom granola-mcp proxy that aggregates across all users.
+        # The OAuth flow (DCR) only needs resource_metadata, not mcp_url.
         "resource_metadata": "https://mcp.granola.ai/.well-known/oauth-protected-resource",
         "scopes": "openid email profile offline_access",
         "supports_dcr": True,
     },
     "gmail": {
+        "mcp_url": os.environ.get("MCP_GMAIL_URL", "http://gmail-mcp:8093"),
         "authorize_url": "https://accounts.google.com/o/oauth2/v2/auth",
         "token_url": "https://oauth2.googleapis.com/token",
         "scopes": "https://www.googleapis.com/auth/gmail.modify",

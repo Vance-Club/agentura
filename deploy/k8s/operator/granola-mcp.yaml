@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: granola-mcp
+  namespace: agentura
+  labels:
+    app: granola-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: granola-mcp
+  template:
+    metadata:
+      labels:
+        app: granola-mcp
+    spec:
+      containers:
+        - name: granola-mcp
+          image: agentura/granola-mcp:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8094
+          env:
+            - name: DATABASE_URL
+              value: postgresql://agentura:agentura_dev@postgres:5432/agentura
+          envFrom:
+            - secretRef:
+                name: agentura-api-keys
+                optional: true
+            - secretRef:
+                name: agentura-mcp-config
+                optional: true
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8094
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            limits:
+              memory: 128Mi
+              cpu: "250m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: granola-mcp
+  namespace: agentura
+spec:
+  selector:
+    app: granola-mcp
+  ports:
+    - port: 8094
+      targetPort: 8094
