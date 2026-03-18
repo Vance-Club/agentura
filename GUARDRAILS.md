@@ -174,3 +174,25 @@ Local k3d (`-n agentura`) is legacy/dev-only. If user explicitly says "local", t
 **Impact**: FastAPI's `/health` endpoint became unresponsive during LLM calls. K8s readiness probe failed → pod killed → "Server disconnected" error to user. This looked like a network issue but was actually event loop starvation.
 **Rule**: In FastAPI async endpoints/generators, ALL blocking I/O (LLM API calls, MCP tool calls, file I/O) MUST use `asyncio.to_thread()` or an async client. The event loop must remain responsive for health probes.
 **Detection**: Any `anthropic.messages.create()`, `requests.post()`, or similar sync call inside an `async def` function without `asyncio.to_thread()` wrapper.
+
+## GR-033: ALL Slack posting paths must handle rich_output → Block Kit (2026-03-18)
+**Mistake**: Heartbeat runner's `deliverAlert()` and `triggerDueSkill()` posted raw JSON strings to Slack when skills returned `{"fallback":"...", "rich_output":{...}}`. The webhook handler correctly parsed rich_output → Block Kit, but the heartbeat/service layer code path bypassed it entirely.
+**Impact**: Users saw raw JSON in Slack channels instead of formatted Block Kit messages. Issue persisted across multiple sessions despite DEC-096 fixing the webhook handler path.
+**Rule**: Every code path that posts skill output to Slack MUST check for rich_output via `slackutil.TryParseRichOutput()` before falling back to plain text. New Slack posting paths MUST be tested with rich_output payloads.
+**Detection**: Any call to `postSlackMessageFromService()` or `postSlackMessage()` where the text could contain `rich_output` JSON without a prior `TryParseRichOutput()` check.
+
+## GR-034: EKS gp2 StorageClass uses deprecated in-tree provisioner — use gp3 (2026-03-18)
+**Mistake**: Installed Coroot with `storageClassName: gp2`. PVCs stayed Pending because `gp2` used `kubernetes.io/aws-ebs` (deprecated in-tree provisioner). The EBS CSI driver (`ebs.csi.eks.amazonaws.com`) was installed but had no StorageClass referencing it.
+**Impact**: Coroot deployment blocked for 15+ minutes debugging PVC binding failures.
+**Rule**: On EKS, always use `gp3` StorageClass with `ebs.csi.eks.amazonaws.com` provisioner. Never use in-tree `kubernetes.io/aws-ebs` — it doesn't work with EKS Auto Mode. `gp3` is now the default StorageClass.
+**Detection**: Any PVC or StorageClass referencing `kubernetes.io/aws-ebs` provisioner.
+
+## GR-035: Debug Slack message issues by tracing the FULL lifecycle, not patching one code path (2026-03-18)
+**Mistake**: Unwanted top-level messages appeared in #ops-tech-issues from heartbeat-triggered and watch_bot-triggered skills. Spent 5 fix iterations patching gateway code paths (removed gateway posting → restored it → made heartbeat notify-only → restored thread reply) without checking whether the *skill itself* had Slack MCP tools and was posting directly via MCP during execution. The actual root cause — `slack_post_message` in the skill's `agentura.config.yaml` — was only discovered on the 5th iteration.
+**Impact**: 5 deploy cycles over 2+ hours. User saw the same bug reappear 4 times. Each "fix" addressed a symptom while the skill continued posting via MCP. Trust eroded significantly.
+**Rule**: When debugging unexpected Slack messages, ALWAYS trace the full message lifecycle BEFORE patching:
+1. **Who posted it?** Check `bot_id` / `app_id` in the Slack message metadata — which bot token was used?
+2. **Which code path?** Gateway handler (`slack_socket.go`) vs service layer (`heartbeat.go`) vs skill-side MCP (`agentura.config.yaml` mcp_tools with `slack_post_message`).
+3. **Check skill config FIRST**: `grep -r "slack_post_message\|slack_send_message" agentura-skills/skills/` — if the skill has Slack MCP tools, it can post independently of the gateway.
+4. **Fix at the source**: Remove the skill's ability to post (delete Slack MCP tools from config) rather than adding compensating logic in the gateway.
+**Detection**: Any PR that modifies gateway Slack posting code without also checking the triggered skill's `agentura.config.yaml` for Slack MCP tools.
