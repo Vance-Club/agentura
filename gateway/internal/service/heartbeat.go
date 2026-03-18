@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/agentura-ai/agentura/gateway/internal/adapter/executor"
 	"github.com/agentura-ai/agentura/gateway/internal/config"
+	"github.com/agentura-ai/agentura/gateway/internal/slackutil"
 )
 
 var (
@@ -32,7 +35,61 @@ var (
 		Name: "agentura_heartbeat_suppressed_total",
 		Help: "Total suppressed heartbeat outputs (HEARTBEAT_OK)",
 	}, []string{"domain"})
+
+	heartbeatDeduplicatedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "agentura_heartbeat_deduplicated_total",
+		Help: "Total heartbeat alerts suppressed by deduplication",
+	}, []string{"domain"})
 )
+
+const (
+	// deduplicationTTL is how long a delivered alert hash is remembered.
+	deduplicationTTL = 30 * time.Minute
+	// deduplicationSweep is how often stale entries are cleaned.
+	deduplicationSweep = 5 * time.Minute
+)
+
+// alertDedup tracks delivered alert content hashes to prevent duplicate Slack messages.
+type alertDedup struct {
+	mu      sync.Mutex
+	entries map[string]time.Time // key: "domain:hash" → delivery time
+}
+
+var globalDedup = &alertDedup{entries: make(map[string]time.Time)}
+
+// isDuplicate returns true if this content was already delivered for this domain within the TTL.
+func (d *alertDedup) isDuplicate(domain, content string) bool {
+	hash := contentHash(content)
+	key := domain + ":" + hash
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if t, ok := d.entries[key]; ok && time.Since(t) < deduplicationTTL {
+		return true
+	}
+	d.entries[key] = time.Now()
+	return false
+}
+
+// sweep removes expired entries.
+func (d *alertDedup) sweep() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	now := time.Now()
+	for k, t := range d.entries {
+		if now.Sub(t) > deduplicationTTL {
+			delete(d.entries, k)
+		}
+	}
+}
+
+// contentHash produces a short SHA-256 hash of the alert content.
+func contentHash(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:8])
+}
 
 // HeartbeatRunner manages periodic heartbeat executions for agent coordinators.
 type HeartbeatRunner struct {
@@ -64,6 +121,22 @@ func (h *HeartbeatRunner) Start(ctx context.Context) {
 	h.mu.Lock()
 	h.running = true
 	h.mu.Unlock()
+
+	// Start deduplication sweep goroutine
+	go func() {
+		ticker := time.NewTicker(deduplicationSweep)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				globalDedup.sweep()
+			case <-h.stopCh:
+				return
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 
 	for _, agent := range h.agents {
 		interval, err := time.ParseDuration(agent.Heartbeat.Every)
@@ -235,6 +308,22 @@ func (h *HeartbeatRunner) deliverAlert(agent config.AgentHeartbeatEntry, output 
 		return
 	}
 
+	// Idempotency: skip if identical content was already delivered within TTL
+	if globalDedup.isDuplicate(agent.Domain, output) {
+		heartbeatDeduplicatedTotal.WithLabelValues(agent.Domain).Inc()
+		slog.Info("heartbeat: duplicate alert suppressed",
+			"domain", agent.Domain, "output_len", len(output))
+		return
+	}
+
+	// First check for rich_output — render as Block Kit if present
+	if blocks, fallback, ok := slackutil.TryParseRichOutput(output); ok {
+		slog.Info("heartbeat: posting rich_output as Block Kit",
+			"domain", agent.Domain, "blocks_count", len(blocks))
+		postSlackBlocksFromService(botToken, target, fallback, blocks)
+		return
+	}
+
 	// Try to parse the due payload — strip markdown fences and backticks
 	var payload heartbeatDuePayload
 	cleaned := strings.TrimSpace(output)
@@ -291,6 +380,7 @@ func (h *HeartbeatRunner) triggerDueSkill(domain, skill, channel, botToken strin
 	}
 
 	slog.Info("heartbeat: skill completed", "domain", domain, "skill", skill)
+	// Skills post their own results via MCP tools — do NOT double-post here.
 }
 
 // findBotToken looks up the Slack bot token for a domain from configured apps.
