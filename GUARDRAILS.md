@@ -162,3 +162,15 @@ Local k3d (`-n agentura`) is legacy/dev-only. If user explicitly says "local", t
 **Impact**: Org-chart rendered growth domain with gray fallback — appeared invisible/broken to the user despite agents being correctly loaded.
 **Rule**: When adding a new domain, ALWAYS add it to ALL 5 color maps in `web/src/lib/colors.ts`: `domainColors`, `domainLabels`, `domainLabelsLong`, `domainCardAccent`, `orgChartDomainColors`. Also verify `domainFallback` renders acceptably as a safety net.
 **Detection**: `grep -c 'growth\|pm\|dev' web/src/lib/colors.ts` — count should be consistent across all color map objects.
+
+## GR-031: PTC/CC worker pods MUST have karpenter.sh/do-not-disrupt annotation (2026-03-17)
+**Mistake**: PTC worker pods had no Karpenter annotation. Karpenter classified running worker pods as "Underutilized" and evicted them mid-execution.
+**Impact**: "Server disconnected without sending a response" errors on churn-risk-scorer. User saw failures on every test. Pods killed after ~2 min of execution.
+**Rule**: All worker pod manifests (PTC and CC) MUST include `annotations: {"karpenter.sh/do-not-disrupt": "true"}` in metadata. These are ephemeral execution pods — evicting them loses work with no recovery.
+**Detection**: Any `_build_worker_manifest()` function missing `karpenter.sh/do-not-disrupt` annotation.
+
+## GR-032: Never use synchronous blocking calls in FastAPI async generators (2026-03-17)
+**Mistake**: PTC worker called `anthropic.messages.create()` synchronously inside an `async def` SSE generator. Each call blocked the event loop for 10-30s.
+**Impact**: FastAPI's `/health` endpoint became unresponsive during LLM calls. K8s readiness probe failed → pod killed → "Server disconnected" error to user. This looked like a network issue but was actually event loop starvation.
+**Rule**: In FastAPI async endpoints/generators, ALL blocking I/O (LLM API calls, MCP tool calls, file I/O) MUST use `asyncio.to_thread()` or an async client. The event loop must remain responsive for health probes.
+**Detection**: Any `anthropic.messages.create()`, `requests.post()`, or similar sync call inside an `async def` function without `asyncio.to_thread()` wrapper.
