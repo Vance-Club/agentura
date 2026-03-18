@@ -855,8 +855,17 @@ func (m *SlackSocketManager) handleWatchBotMessage(app *config.SlackAppConfig, w
 		Text: ev.Text,
 	}
 
-	_, _ = m.dispatchAndFormat(app, ev.Channel, "", cmd, "", ev.TimeStamp)
-	// Skills post their own results via MCP tools — do NOT double-post here.
+	result, _ := m.dispatchAndFormat(app, ev.Channel, "", cmd, "", ev.TimeStamp)
+
+	// Post result as a thread reply under the triggering bot's message.
+	// The skill may also post top-level via MCP — that's a skill-side fix.
+	if result != "" && !strings.HasPrefix(result, "Error:") {
+		if blocks, fallback, ok := tryParseRichOutput(result); ok {
+			postSlackBlocksWithTS(app.BotToken, ev.Channel, ev.TimeStamp, fallback, blocks)
+		} else {
+			postSlackThreadReply(app.BotToken, ev.Channel, ev.TimeStamp, result)
+		}
+	}
 
 	slog.Info("watch_bot: skill completed",
 		"app", app.Name, "skill", wb.Skill, "channel", ev.Channel)
