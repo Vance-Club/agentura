@@ -23,7 +23,10 @@ spec:
             - containerPort: 8094
           env:
             - name: DATABASE_URL
-              value: postgresql://agentura:agentura_dev@postgres:5432/agentura
+              valueFrom:
+                secretKeyRef:
+                  name: agentura-db
+                  key: url
           envFrom:
             - secretRef:
                 name: agentura-api-keys
