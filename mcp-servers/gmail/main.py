@@ -17,6 +17,11 @@ from pydantic import BaseModel
 app = FastAPI(title="gmail-mcp")
 logger = logging.getLogger("uvicorn")
 
+# Default "Send as" address — set to a Google Group or alias configured
+# as "Send mail as" in the authenticating user's Gmail settings.
+# If unset, emails send from the OAuth user's primary address.
+DEFAULT_SEND_AS = os.environ.get("GMAIL_SEND_AS", "")
+
 
 def _service(token: str):
     from google.oauth2.credentials import Credentials
@@ -83,7 +88,7 @@ TOOLS = [
     },
     {
         "name": "gmail_send_email",
-        "description": "Send an email from the authenticated user's Gmail account.",
+        "description": "Send an email. Sends from the configured team address (e.g. equities-pm@aspora.com) by default.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -94,13 +99,14 @@ TOOLS = [
                 "bcc": {"type": "string", "description": "BCC recipients, comma-separated"},
                 "thread_id": {"type": "string", "description": "Thread ID to reply in (optional)"},
                 "in_reply_to": {"type": "string", "description": "Message-ID header of message being replied to"},
+                "from_address": {"type": "string", "description": "Override sender address (must be a configured Send-as alias)"},
             },
             "required": ["to", "subject", "body"],
         },
     },
     {
         "name": "gmail_create_draft",
-        "description": "Create a draft email without sending it.",
+        "description": "Create a draft email without sending it. Uses the configured team address by default.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -109,6 +115,7 @@ TOOLS = [
                 "body": {"type": "string", "description": "Email body (plain text)"},
                 "cc": {"type": "string", "description": "CC recipients, comma-separated"},
                 "thread_id": {"type": "string", "description": "Thread ID (optional, for reply drafts)"},
+                "from_address": {"type": "string", "description": "Override sender address (must be a configured Send-as alias)"},
             },
             "required": ["to", "subject", "body"],
         },
@@ -224,11 +231,17 @@ def _parse_message(msg: dict) -> dict:
 
 
 def _build_mime_message(to: str, subject: str, body: str, cc: str = "", bcc: str = "",
-                        in_reply_to: str = "", references: str = "") -> dict:
+                        in_reply_to: str = "", references: str = "",
+                        from_address: str = "") -> dict:
     """Build a Gmail API message resource from components."""
     message = MIMEText(body)
     message["to"] = to
     message["subject"] = subject
+    # Set From to the shared team address (e.g. equities-pm@aspora.com)
+    # The authenticating user must have this configured as a "Send mail as" alias
+    sender = from_address or DEFAULT_SEND_AS
+    if sender:
+        message["from"] = sender
     if cc:
         message["cc"] = cc
     if bcc:
@@ -300,6 +313,7 @@ def _send_email(token: str, args: dict) -> str:
         cc=args.get("cc", ""),
         bcc=args.get("bcc", ""),
         in_reply_to=args.get("in_reply_to", ""),
+        from_address=args.get("from_address", ""),
     )
     if args.get("thread_id"):
         msg_body["threadId"] = args["thread_id"]
@@ -313,6 +327,7 @@ def _create_draft(token: str, args: dict) -> str:
     msg_body = _build_mime_message(
         to=args["to"], subject=args["subject"], body=args["body"],
         cc=args.get("cc", ""),
+        from_address=args.get("from_address", ""),
     )
     draft_body = {"message": msg_body}
     if args.get("thread_id"):
