@@ -172,6 +172,36 @@ TOOLS = [
             "required": ["block_id", "children"],
         },
     },
+    {
+        "name": "notion_create_database",
+        "description": "Create an inline database on a page. Use for chart-ready data sets that users can switch to chart view in Notion UI.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "parent_page_id": {"type": "string", "description": "Page ID to embed database in"},
+                "title": {"type": "string", "description": "Database title"},
+                "properties": {"type": "object", "description": "Database schema (Notion property definitions)"},
+            },
+            "required": ["parent_page_id", "title", "properties"],
+        },
+    },
+    {
+        "name": "notion_add_database_rows",
+        "description": "Insert multiple rows into a Notion database. Max 50 rows per call.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "database_id": {"type": "string", "description": "Database ID to insert rows into"},
+                "rows": {
+                    "type": "array",
+                    "description": "Array of row objects, each with property name to value mappings (Notion property format)",
+                    "items": {"type": "object"},
+                    "maxItems": 50,
+                },
+            },
+            "required": ["database_id", "rows"],
+        },
+    },
 ]
 
 
@@ -197,6 +227,8 @@ def call_tool(req: ToolCallRequest):
         "notion_get_database": _get_database,
         "notion_list_users": _list_users,
         "notion_append_children": _append_children,
+        "notion_create_database": _create_database,
+        "notion_add_database_rows": _add_database_rows,
     }
     handler = handlers.get(req.name)
     if not handler:
@@ -332,6 +364,30 @@ def _append_children(args: dict) -> str:
         "appended": len(args["children"]),
         "has_more": data.get("has_more", False),
     }, indent=2)
+
+
+def _create_database(args: dict) -> str:
+    body = {
+        "parent": {"type": "page_id", "page_id": args["parent_page_id"]},
+        "title": [{"type": "text", "text": {"content": args["title"]}}],
+        "is_inline": True,
+        "properties": args["properties"],
+    }
+    resp = httpx.post(f"{BASE_URL}/databases", headers=_headers(), json=body, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+    return json.dumps({"database_id": data["id"], "title": args["title"]}, indent=2)
+
+
+def _add_database_rows(args: dict) -> str:
+    db_id = args["database_id"]
+    results = []
+    for row in args["rows"]:
+        body = {"parent": {"database_id": db_id}, "properties": row}
+        resp = httpx.post(f"{BASE_URL}/pages", headers=_headers(), json=body, timeout=15)
+        resp.raise_for_status()
+        results.append(resp.json()["id"])
+    return json.dumps({"inserted": len(results), "database_id": db_id}, indent=2)
 
 
 def _list_users(args: dict) -> str:
