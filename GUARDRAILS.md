@@ -162,3 +162,9 @@ Local k3d (`-n agentura`) is legacy/dev-only. If user explicitly says "local", t
 **Impact**: Org-chart rendered growth domain with gray fallback — appeared invisible/broken to the user despite agents being correctly loaded.
 **Rule**: When adding a new domain, ALWAYS add it to ALL 5 color maps in `web/src/lib/colors.ts`: `domainColors`, `domainLabels`, `domainLabelsLong`, `domainCardAccent`, `orgChartDomainColors`. Also verify `domainFallback` renders acceptably as a safety net.
 **Detection**: `grep -c 'growth\|pm\|dev' web/src/lib/colors.ts` — count should be consistent across all color map objects.
+
+## GR-031: Suppress Slack output on upstream API/billing/auth errors (2026-03-22)
+**Mistake**: When Anthropic API returned "credit balance is too low" (HTTP 400), the error message was posted directly to Slack as if it were skill output.
+**Impact**: Raw error JSON posted to user-facing Slack channels; users see billing internals instead of a clean "skill failed" notice.
+**Rule**: Before posting skill output to Slack, check for upstream API error patterns (billing, auth, rate limit, overloaded). If detected, suppress the full output and post an ephemeral warning instead. The heartbeat service already had `isExecutorError` — the Slack webhook handler was missing the same guard.
+**Detection**: `grep -c 'isUpstreamError\|isExecutorError' gateway/internal/handler/slack_webhook.go gateway/internal/service/heartbeat.go` — both files should have error detection.

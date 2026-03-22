@@ -426,6 +426,15 @@ func (h *SlackWebhookHandler) handleMessage(w http.ResponseWriter, app *config.S
 			removeSlackReaction(app.BotToken, event.Channel, event.TS, typingReaction)
 		}
 
+		// Suppress Slack output for upstream API/billing/auth errors (GR-030)
+		if isUpstreamError(result) {
+			slog.Error("suppressing Slack post for upstream error",
+				"app", app.Name, "result_preview", result[:min(200, len(result))])
+			postEphemeralMessage(app.BotToken, event.Channel, event.User,
+				":warning: Skill failed due to an upstream API error (billing/auth). Check logs for details.")
+			return
+		}
+
 		// Post result — use Block Kit if skill returned rich_output
 		var postedTS string
 		if blocks, fallback, ok := tryParseRichOutput(result); ok {
@@ -1201,6 +1210,27 @@ func parseSlackTimestamp(ts string) (time.Time, error) {
 
 func isSlackSecretPlaceholder(s string) bool {
 	return strings.HasPrefix(s, "${") && strings.HasSuffix(s, "}")
+}
+
+// isUpstreamError detects upstream API/billing/auth errors in skill output.
+// When true, the result should NOT be posted to Slack — only an ephemeral
+// warning. Mirrors the heartbeat service's isExecutorError (GR-030).
+func isUpstreamError(output string) bool {
+	patterns := []string{
+		"credit balance is too low",
+		"rate_limit_error",
+		"authentication_error",
+		"overloaded_error",
+		"invalid_api_key",
+		"not authorized",
+	}
+	lower := strings.ToLower(output)
+	for _, p := range patterns {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func isAllowed(name string, allowList []string) bool {
