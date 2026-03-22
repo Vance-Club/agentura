@@ -1401,6 +1401,19 @@ def get_execution(execution_id: str, domains: set[str] | None = Depends(_get_dom
     return ExecutionDetail(execution=execution, corrections=corrections, reflexions=reflexions)
 
 
+@app.get("/api/v1/executions/{execution_id}/trace")
+def get_execution_trace(execution_id: str):
+    """Get the tool-call trace for an execution."""
+    try:
+        from agentura_sdk.memory import get_memory_store
+
+        store = get_memory_store()
+        trace = store.get_execution_trace(execution_id)
+        return {"execution_id": execution_id, "trace": trace, "count": len(trace)}
+    except Exception as e:
+        return {"execution_id": execution_id, "trace": [], "count": 0, "error": str(e)}
+
+
 @app.get("/api/v1/analytics", response_model=AnalyticsResponse)
 def get_analytics(domains: set[str] | None = Depends(_get_domain_scope)):
     """Aggregate metrics across all executions, corrections, and reflexions (domain-scoped)."""
@@ -1708,10 +1721,16 @@ def semantic_search(domain: str, skill_name: str, req: SemanticSearchRequest, do
     try:
         from agentura_sdk.memory import get_memory_store
         from agentura_sdk.memory.mem0_store import Mem0Store
+        from agentura_sdk.memory.store import CompositeStore
 
         store = get_memory_store()
         results = store.search_similar(skill_path, req.query, limit=req.limit)
-        backend = "mem0" if isinstance(store, Mem0Store) else "json"
+        if isinstance(store, CompositeStore):
+            backend = "postgresql+mem0"
+        elif isinstance(store, Mem0Store):
+            backend = "mem0"
+        else:
+            backend = "json"
         return SemanticSearchResult(results=results, backend=backend)
     except Exception as e:
         return SemanticSearchResult(results=[], backend=f"error: {e}")
@@ -1876,8 +1895,19 @@ def memory_search(req: CrossDomainSearchRequest, domains: set[str] | None = Depe
             if s:
                 skills_set.add(s)
 
-        # Try semantic search via mem0
-        if isinstance(store, Mem0Store):
+        # Try semantic search via mem0 or CompositeStore
+        from agentura_sdk.memory.store import CompositeStore
+        if isinstance(store, CompositeStore):
+            backend = "postgresql+mem0"
+            for skill in list(skills_set)[:50]:
+                try:
+                    hits = store.search_similar(skill, req.query, limit=3)
+                    for h in hits:
+                        h["skill"] = skill
+                        all_results.append(h)
+                except Exception:
+                    pass
+        elif isinstance(store, Mem0Store):
             backend = "mem0"
             for skill in skills_set:
                 hits = store.search_similar(skill, req.query, limit=3)

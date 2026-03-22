@@ -145,6 +145,21 @@ ALTER TABLE executions ADD COLUMN IF NOT EXISTS pending_approvals JSONB DEFAULT 
 -- RBAC: track who triggered each execution
 ALTER TABLE executions ADD COLUMN IF NOT EXISTS triggered_by VARCHAR(200) DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_executions_triggered_by ON executions(triggered_by);
+
+-- Execution traces: tool-level call sequences per execution
+CREATE TABLE IF NOT EXISTS execution_traces (
+    id SERIAL PRIMARY KEY,
+    execution_id TEXT NOT NULL,
+    iteration INT NOT NULL,
+    tool_name TEXT NOT NULL,
+    tool_input JSONB,
+    tool_output TEXT DEFAULT '',
+    success BOOLEAN DEFAULT TRUE,
+    timestamp TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(execution_id, iteration)
+);
+CREATE INDEX IF NOT EXISTS idx_traces_execution ON execution_traces(execution_id);
+CREATE INDEX IF NOT EXISTS idx_traces_tool ON execution_traces(tool_name);
 """
 
 
@@ -597,6 +612,66 @@ class PgStore:
                 count = cur.rowcount
             conn.commit()
             return count
+        finally:
+            self._pool.putconn(conn)
+
+    # --- Execution traces ---
+
+    def log_execution_trace(self, execution_id: str, iterations: list[dict]) -> None:
+        """Bulk insert tool-call trace for an execution."""
+        if not iterations:
+            return
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                psycopg2.extras.execute_values(
+                    cur,
+                    """INSERT INTO execution_traces
+                       (execution_id, iteration, tool_name, tool_input, tool_output, success, timestamp)
+                       VALUES %s
+                       ON CONFLICT (execution_id, iteration) DO NOTHING""",
+                    [
+                        (
+                            execution_id,
+                            it.get("iteration", i + 1),
+                            it.get("tool_name", ""),
+                            self._serialize_json(it.get("tool_input")),
+                            str(it.get("tool_output", ""))[:2000],
+                            it.get("success", True),
+                            it.get("timestamp", datetime.now(timezone.utc).isoformat()),
+                        )
+                        for i, it in enumerate(iterations)
+                    ],
+                )
+            conn.commit()
+        finally:
+            self._pool.putconn(conn)
+
+    def get_execution_trace(self, execution_id: str) -> list[dict]:
+        """Return tool-call sequence for an execution, ordered by iteration."""
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """SELECT execution_id, iteration, tool_name, tool_input, tool_output, success, timestamp
+                       FROM execution_traces
+                       WHERE execution_id = %s
+                       ORDER BY iteration""",
+                    (execution_id,),
+                )
+                rows = []
+                for row in cur.fetchall():
+                    d = dict(row)
+                    if isinstance(d.get("tool_input"), str):
+                        try:
+                            d["tool_input"] = json.loads(d["tool_input"])
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                    if hasattr(d.get("timestamp"), "isoformat"):
+                        d["timestamp"] = d["timestamp"].isoformat()
+                    d.pop("id", None)
+                    rows.append(d)
+                return rows
         finally:
             self._pool.putconn(conn)
 

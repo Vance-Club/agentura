@@ -46,6 +46,9 @@ def log_execution(ctx: SkillContext, result: SkillResult) -> str:
         outcome = "accepted"
     else:
         outcome = "error"
+    # Pop trace data before building entry (don't store in output_summary)
+    trace_data = result.output.pop("_trace", None) if isinstance(result.output, dict) else None
+
     entry = {
         "execution_id": execution_id,
         "skill": skill_path,
@@ -82,6 +85,13 @@ def log_execution(ctx: SkillContext, result: SkillResult) -> str:
         if result.success and ctx.injected_reflexion_ids:
             try:
                 store.record_execution_success(execution_id)
+            except Exception:
+                pass
+
+        # Execution traces: persist tool-call sequence from executor
+        if trace_data:
+            try:
+                store.log_execution_trace(execution_id, trace_data)
             except Exception:
                 pass
     except Exception:

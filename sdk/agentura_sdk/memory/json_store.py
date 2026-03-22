@@ -155,6 +155,14 @@ class JSONStore:
         matches.sort(key=lambda e: e.get("utility_score", 0.5), reverse=True)
         return matches[:limit]
 
+    # --- Execution traces (PG-only, no-op here) ---
+
+    def log_execution_trace(self, execution_id: str, iterations: list[dict]) -> None:
+        pass
+
+    def get_execution_trace(self, execution_id: str) -> list[dict]:
+        return []
+
     # --- Incident-to-eval (DEC-067) ---
 
     def log_failure_case(self, skill_path: str, data: dict) -> str:

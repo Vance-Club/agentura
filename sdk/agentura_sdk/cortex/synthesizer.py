@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 _MAX_ENTRIES_PER_SKILL = 20
 # Maximum error text length
 _MAX_ERROR_LEN = 200
+# Maximum trace steps to include per execution
+_MAX_TRACE_STEPS = 10
 
 
 @dataclass
@@ -125,8 +127,8 @@ def synthesize(
     except Exception:
         pass
 
-    # Build compact summaries
-    logs_section = _build_logs_section(by_skill, corrections_by_skill)
+    # Build compact summaries (with trace enrichment when available)
+    logs_section = _build_logs_section(by_skill, corrections_by_skill, store=store)
 
     # Call cheap LLM
     prompt = _SYNTHESIS_PROMPT.format(
@@ -172,6 +174,7 @@ def synthesize(
 def _build_logs_section(
     by_skill: dict[str, list[dict]],
     corrections_by_skill: dict[str, list[dict]],
+    store=None,
 ) -> str:
     """Build compact text representation of failures for the LLM."""
     sections = []
@@ -181,6 +184,18 @@ def _build_logs_section(
             error = str(entry.get("output_summary", {}).get("error", ""))[:_MAX_ERROR_LEN]
             ts = str(entry.get("timestamp", ""))[:19]
             lines.append(f"- [{ts}] {error}")
+
+            # Include trace if available
+            if store and entry.get("execution_id"):
+                try:
+                    trace = store.get_execution_trace(entry["execution_id"])
+                    if trace:
+                        lines.append("  Trace:")
+                        for step in trace[:_MAX_TRACE_STEPS]:
+                            inp = json.dumps(step.get("tool_input", {}))[:100]
+                            lines.append(f"    {step['iteration']}. {step['tool_name']}({inp})")
+                except Exception:
+                    pass
 
         # Include corrections if available
         corrections = corrections_by_skill.get(skill, [])

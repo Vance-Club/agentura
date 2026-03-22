@@ -12,10 +12,13 @@ Usage:
 from __future__ import annotations
 
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
+
+logger = logging.getLogger(__name__)
 
 
 class MemoryStore(Protocol):
@@ -41,6 +44,9 @@ class MemoryStore(Protocol):
     def approve_execution_atomic(self, execution_id: str, new_outcome: str, reviewer_notes: str = "") -> tuple[str, dict | None]: ...
     def update_execution_output(self, execution_id: str, output_summary: object, outcome: str | None = None) -> bool: ...
     def update_execution_pending_approvals(self, execution_id: str, pending_approvals: list[dict]) -> bool: ...
+    # Execution traces
+    def log_execution_trace(self, execution_id: str, iterations: list[dict]) -> None: ...
+    def get_execution_trace(self, execution_id: str) -> list[dict]: ...
 
 
 _store_instance: MemoryStore | None = None
@@ -153,6 +159,15 @@ class CompositeStore:
             return self._pg.update_execution_pending_approvals(execution_id, pending_approvals)
         return False
 
+    def log_execution_trace(self, execution_id: str, iterations: list[dict]) -> None:
+        if hasattr(self._pg, "log_execution_trace"):
+            self._pg.log_execution_trace(execution_id, iterations)
+
+    def get_execution_trace(self, execution_id: str) -> list[dict]:
+        if hasattr(self._pg, "get_execution_trace"):
+            return self._pg.get_execution_trace(execution_id)
+        return []
+
     @property
     def pg(self):
         return self._pg
@@ -185,15 +200,15 @@ def get_memory_store() -> MemoryStore:
         try:
             from agentura_sdk.memory.pg_store import PgStore
             pg_store = PgStore(dsn=database_url)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("PgStore init failed (falling back): %s", e)
 
     if has_llm_key:
         try:
             from agentura_sdk.memory.mem0_store import Mem0Store
             mem0_store = Mem0Store()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("mem0 init failed (falling back to PG-only): %s", e)
 
     # Composite: Postgres persistence + mem0 semantic search
     if pg_store and mem0_store:

@@ -242,6 +242,14 @@ class Mem0Store:
                     self._memory.update(mem_id, update_msg)
                 break
 
+    # --- Execution traces (PG-only, no-op here) ---
+
+    def log_execution_trace(self, execution_id: str, iterations: list[dict]) -> None:
+        pass
+
+    def get_execution_trace(self, execution_id: str) -> list[dict]:
+        return []
+
     @staticmethod
     def _to_dict(mem: dict) -> dict:
         """Convert mem0 memory entry to flat dict."""

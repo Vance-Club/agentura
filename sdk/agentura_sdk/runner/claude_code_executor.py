@@ -223,6 +223,9 @@ async def execute_claude_code(ctx: SkillContext) -> SkillResult:
                                     tool_output="",
                                     timestamp=data.get("timestamp", datetime.now(timezone.utc).isoformat()),
                                 ))
+                            elif event_type == "tool_result":
+                                if iterations:
+                                    iterations[-1].tool_output = data.get("output", "")[:2000]
                             elif event_type == "result":
                                 result_data = data
                             elif event_type == "error":
@@ -240,6 +243,15 @@ async def execute_claude_code(ctx: SkillContext) -> SkillResult:
         context_for_next: dict = {}
         if artifacts:
             context_for_next["artifacts"] = artifacts
+
+        # Stash trace data for log_execution() to persist with execution_id
+        if iterations:
+            output["_trace"] = [
+                {"iteration": it.iteration, "tool_name": it.tool_name,
+                 "tool_input": it.tool_input, "tool_output": it.tool_output,
+                 "timestamp": it.timestamp}
+                for it in iterations
+            ]
 
         return SkillResult(
             skill_name=ctx.skill_name,
