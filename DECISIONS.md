@@ -313,3 +313,9 @@
 **Over**: Sequential chaining, single monolithic skill
 **Why**: Independent analyses (volume + margin + lapse) have no data dependencies — parallel execution cuts wall-clock time by ~3x
 **Constraint**: Fan-in aggregation not yet implemented (no reporter step); each skill posts independently
+
+## DEC-096: Go-native heartbeat schedule checker over LLM coordinator (2026-03-24)
+**Chose**: Declarative `schedule:` rules in config.yaml evaluated by Go time/day matching in gateway, with dedup tracking (2h window). LLM heartbeat retained as fallback (Haiku).
+**Over**: LLM heartbeat skill (Sonnet) querying Databricks SQL for time windows every 30m
+**Why**: 4 domain heartbeats × 30m intervals = 86 Sonnet calls/day ($8.60/day, $258/month) just to check `time.Now()`. 80%+ returned HEARTBEAT_OK. Schedule rules are pure time logic — no data access, no LLM reasoning needed. Go evaluation is free and instant.
+**Constraint**: Domains with `schedule:` rules MUST keep rules in sync with SKILL.md schedules; domains without `schedule:` fall back to LLM (Haiku); dedup window is 2h (must be ≥ widest schedule interval)

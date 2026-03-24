@@ -163,6 +163,12 @@ Local k3d (`-n agentura`) is legacy/dev-only. If user explicitly says "local", t
 **Rule**: When adding a new domain, ALWAYS add it to ALL 5 color maps in `web/src/lib/colors.ts`: `domainColors`, `domainLabels`, `domainLabelsLong`, `domainCardAccent`, `orgChartDomainColors`. Also verify `domainFallback` renders acceptably as a safety net.
 **Detection**: `grep -c 'growth\|pm\|dev' web/src/lib/colors.ts` — count should be consistent across all color map objects.
 
+## GR-032: Never use LLM calls for deterministic logic (time checks, config lookups, math) (2026-03-24)
+**Mistake**: Heartbeat coordinator skills used Sonnet LLM + Databricks SQL to evaluate `CASE WHEN time_hhmm >= '08:30' AND time_hhmm < '09:30' AND day = 'Monday' THEN 1 ELSE 0 END` — pure time/day matching that `time.Now()` handles for free. 4 domains × 30m intervals = 86 Sonnet calls/day.
+**Impact**: $8.60/day ($258/month) burned on zero-value schedule checks. Anthropic credit balance depleted faster than necessary. 80%+ of calls returned HEARTBEAT_OK (nothing due).
+**Rule**: If the logic can be expressed as a deterministic function (time windows, day-of-week, threshold comparisons, config lookups), it MUST NOT go through an LLM. LLM calls are for reasoning over unstructured data, not for `if hour >= 8 && hour < 9`. When adding scheduled skills, add a `schedule:` rule to config.yaml — don't rely on the heartbeat LLM to parse a SQL query.
+**Detection**: Any heartbeat/coordinator skill whose SKILL.md contains SQL with `CASE WHEN time_hhmm` or `HOUR(NOW())` comparisons — these should be config rules, not LLM queries.
+
 ## GR-031: Socket mode and webhook handlers must stay in sync — no duplicated dispatch logic (2026-03-23)
 **Mistake**: `slack_socket.go` had its own copy of `dispatchAndFormat` that diverged from `slack_webhook.go`. When `savedUserID` fix was added to the webhook handler's alias matching, the socket handler's copy was missed. Result: `cmd = *aliasCmd` in socket mode overwrote `cmd.UserID` with empty string → executor received no `user_id` → OAuth tokens never resolved → "Gmail unavailable" for ALL socket-mode Slack bots.
 **Impact**: Every Slack bot using socket mode (GE, PM, Growth) silently lost OAuth-authenticated MCP access. The bug was invisible because: (a) API tests bypassed socket mode, (b) the executor returned 200 with degraded results instead of erroring, (c) the LLM hallucinated plausible-looking output with no tools.
