@@ -316,14 +316,14 @@ def _create_dashboard(args: dict) -> str:
     if existing:
         _clear_dashboard_cards(existing["id"])
         logger.info("Reusing dashboard %d (%s) — cleared old cards", existing["id"], name)
-        return json.dumps({"id": existing["id"], "name": name, "reused": True})
+        return json.dumps({"id": existing["id"], "name": name, "url": f"{METABASE_URL}/dashboard/{existing['id']}", "reused": True})
     body = {"name": name}
     if args.get("description"):
         body["description"] = args["description"]
     if collection_id:
         body["collection_id"] = collection_id
     data = _post("/dashboard", body)
-    return json.dumps({"id": data["id"], "name": data["name"], "reused": False})
+    return json.dumps({"id": data["id"], "name": data["name"], "url": f"{METABASE_URL}/dashboard/{data['id']}", "reused": False})
 
 
 def _create_card(args: dict) -> str:
