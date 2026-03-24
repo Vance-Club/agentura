@@ -48,6 +48,13 @@ type AgentHeartbeatEntry struct {
 	Heartbeat   AgentHeartbeatConfig `yaml:"heartbeat"`
 }
 
+// ScheduleRule defines when a skill should fire: time window + allowed days.
+type ScheduleRule struct {
+	Skill string `yaml:"skill"`
+	Time  string `yaml:"time"` // "HH:MM-HH:MM"
+	Days  []int  `yaml:"days"` // 0=Sun, 1=Mon, ..., 6=Sat
+}
+
 // AgentHeartbeatConfig defines the heartbeat schedule and delivery for one agent.
 type AgentHeartbeatConfig struct {
 	Every           string             `yaml:"every"`            // e.g. "30m", "1h"
@@ -59,6 +66,7 @@ type AgentHeartbeatConfig struct {
 	ActiveHours     ActiveHoursConfig  `yaml:"active_hours"`
 	AckMaxChars     int                `yaml:"ack_max_chars"`    // max chars for HEARTBEAT_OK ack
 	Silent          bool               `yaml:"silent"`           // suppress ack messages, still trigger skills
+	Schedule        []ScheduleRule     `yaml:"schedule"`         // Go-native schedule rules (skip LLM if present)
 }
 
 // ActiveHoursConfig gates heartbeat execution to a time window.

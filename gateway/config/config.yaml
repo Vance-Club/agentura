@@ -364,10 +364,10 @@ agents:
   - domain: growth
     coordinator: growth-coordinator
     heartbeat:
-      every: "30m"
+      every: "2h"
       target: "${GROWTH_HEARTBEAT_CHANNEL}"
       observe: "C0ALSCUV7J8"
-      model: "anthropic/claude-sonnet-4-5-20250929"
+      model: "anthropic/claude-haiku-4-5-20251001"
       light_context: true
       isolated_session: true
       silent: true
@@ -376,12 +376,28 @@ agents:
         end: "17:00"
         timezone: "UTC"
       ack_max_chars: 300
+      schedule:
+        - skill: weekly-review
+          time: "08:30-09:30"
+          days: [1]
+        - skill: daily-pulse
+          time: "08:30-09:30"
+          days: [2,3,4,5]
+        - skill: growth-canvas
+          time: "09:00-10:00"
+          days: [1,2,3,4,5]
+        - skill: anomaly-alert
+          time: "09:30-10:30"
+          days: [1,2,3,4,5]
+        - skill: funnel-health
+          time: "15:30-16:30"
+          days: [5]
   - domain: ecm
     coordinator: ecm-coordinator
     heartbeat:
       every: "30m"
       target: "${ECM_HEARTBEAT_CHANNEL}"
-      model: "anthropic/claude-sonnet-4-5-20250929"
+      model: "anthropic/claude-haiku-4-5-20251001"
       light_context: true
       isolated_session: true
       silent: true
@@ -390,13 +406,83 @@ agents:
         end: "17:30"
         timezone: "UTC"
       ack_max_chars: 300
+      schedule:
+        - skill: triage
+          time: "03:00-04:00"
+          days: [1,2,3,4,5,6]
+        - skill: triage
+          time: "10:00-11:00"
+          days: [1,2,3,4,5,6]
+        - skill: triage
+          time: "16:00-17:00"
+          days: [1,2,3,4,5,6]
+        - skill: ecm-canvas
+          time: "07:00-08:00"
+          days: [1,2,3,4,5]
+        - skill: pattern-intelligence
+          time: "07:00-08:00"
+          days: [1,2,3,4,5]
+        - skill: ecm-daily-flow
+          time: "00:00-00:30"
+          days: [1,2,3,4,5,6]
+        - skill: ecm-daily-flow
+          time: "01:00-01:30"
+          days: [1,2,3,4,5,6]
+        - skill: ecm-daily-flow
+          time: "02:00-02:30"
+          days: [1,2,3,4,5,6]
+        - skill: ecm-daily-flow
+          time: "03:00-03:30"
+          days: [1,2,3,4,5,6]
+        - skill: ecm-daily-flow
+          time: "04:00-04:30"
+          days: [1,2,3,4,5,6]
+        - skill: ecm-daily-flow
+          time: "05:00-05:30"
+          days: [1,2,3,4,5,6]
+        - skill: ecm-daily-flow
+          time: "06:00-06:30"
+          days: [1,2,3,4,5,6]
+        - skill: ecm-daily-flow
+          time: "07:00-07:30"
+          days: [1,2,3,4,5,6]
+        - skill: ecm-daily-flow
+          time: "08:00-08:30"
+          days: [1,2,3,4,5,6]
+        - skill: ecm-daily-flow
+          time: "09:00-09:30"
+          days: [1,2,3,4,5,6]
+        - skill: ecm-daily-flow
+          time: "10:00-10:30"
+          days: [1,2,3,4,5,6]
+        - skill: ecm-daily-flow
+          time: "11:00-11:30"
+          days: [1,2,3,4,5,6]
+        - skill: ecm-daily-flow
+          time: "12:00-12:30"
+          days: [1,2,3,4,5,6]
+        - skill: ecm-daily-flow
+          time: "13:00-13:30"
+          days: [1,2,3,4,5,6]
+        - skill: ecm-daily-flow
+          time: "14:00-14:30"
+          days: [1,2,3,4,5,6]
+        - skill: ecm-daily-flow
+          time: "15:00-15:30"
+          days: [1,2,3,4,5,6]
+        - skill: ecm-daily-flow
+          time: "16:00-16:30"
+          days: [1,2,3,4,5,6]
+        - skill: ecm-daily-flow
+          time: "17:00-17:30"
+          days: [1,2,3,4,5,6]
   - domain: ge
     coordinator: ge-coordinator
     heartbeat:
-      every: "30m"
+      every: "1h"
       target: "C0AF7RASHNX"
       observe: "C0AF7RASHNX"
-      model: "anthropic/claude-sonnet-4-5-20250929"
+      model: "anthropic/claude-haiku-4-5-20251001"
       light_context: true
       isolated_session: true
       silent: true
@@ -405,3 +491,19 @@ agents:
         end: "15:00"
         timezone: "UTC"
       ack_max_chars: 300
+      schedule:
+        - skill: context-refresh
+          time: "03:00-04:00"
+          days: [0,1,2,3,4,5,6]
+        - skill: daily-briefing
+          time: "04:00-05:00"
+          days: [1,2,3,4,5]
+        - skill: action-tracker
+          time: "05:00-06:00"
+          days: [1,2,3,4,5]
+        - skill: meeting-scan
+          time: "14:00-15:00"
+          days: [0,1,2,3,4,5,6]
+        - skill: daily-wrap
+          time: "14:00-15:00"
+          days: [1,2,3,4,5]

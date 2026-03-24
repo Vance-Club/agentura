@@ -36,21 +36,24 @@ var (
 
 // HeartbeatRunner manages periodic heartbeat executions for agent coordinators.
 type HeartbeatRunner struct {
-	executor  *executor.Client
-	agents    []config.AgentHeartbeatEntry
-	slackApps []config.SlackAppConfig
-	mu        sync.RWMutex
-	running   bool
-	stopCh    chan struct{}
+	executor     *executor.Client
+	agents       []config.AgentHeartbeatEntry
+	slackApps    []config.SlackAppConfig
+	mu           sync.RWMutex
+	running      bool
+	stopCh       chan struct{}
+	lastTriggered map[string]time.Time // dedup: "{domain}/{skill}" → last trigger time
+	dedupMu       sync.Mutex
 }
 
 // NewHeartbeatRunner creates a runner for agent heartbeats.
 func NewHeartbeatRunner(exec *executor.Client, agents []config.AgentHeartbeatEntry, slackApps []config.SlackAppConfig) *HeartbeatRunner {
 	return &HeartbeatRunner{
-		executor:  exec,
-		agents:    agents,
-		slackApps: slackApps,
-		stopCh:    make(chan struct{}),
+		executor:      exec,
+		agents:        agents,
+		slackApps:     slackApps,
+		stopCh:        make(chan struct{}),
+		lastTriggered: make(map[string]time.Time),
 	}
 }
 
@@ -138,7 +141,73 @@ func (h *HeartbeatRunner) runHeartbeat(ctx context.Context, agent config.AgentHe
 		return
 	}
 
-	slog.Info("heartbeat: executing",
+	// Go-native schedule check: if schedule rules exist, skip LLM entirely.
+	if len(agent.Heartbeat.Schedule) > 0 {
+		h.runGoNativeHeartbeat(ctx, agent)
+		return
+	}
+
+	// Fallback: LLM-based heartbeat (for domains without schedule rules).
+	h.runLLMHeartbeat(ctx, agent)
+}
+
+// runGoNativeHeartbeat evaluates schedule rules in Go — zero LLM cost.
+func (h *HeartbeatRunner) runGoNativeHeartbeat(ctx context.Context, agent config.AgentHeartbeatEntry) {
+	domain := agent.Domain
+	now := h.resolveNow(agent.Heartbeat.ActiveHours.Timezone)
+
+	dueSkills := checkDueSkills(agent.Heartbeat.Schedule, now)
+
+	// Dedup: filter out skills triggered recently (within 2h).
+	var newDue []string
+	h.dedupMu.Lock()
+	for _, skill := range dueSkills {
+		key := domain + "/" + skill
+		if last, ok := h.lastTriggered[key]; ok && now.Sub(last) < 2*time.Hour {
+			slog.Debug("heartbeat: skipping (dedup)", "domain", domain, "skill", skill,
+				"last_triggered", last.Format("15:04"))
+			continue
+		}
+		h.lastTriggered[key] = now
+		newDue = append(newDue, skill)
+	}
+	h.dedupMu.Unlock()
+
+	observeChannel := agent.Heartbeat.Observe
+	botToken := h.findBotToken(domain)
+
+	if len(newDue) == 0 {
+		heartbeatExecutionsTotal.WithLabelValues(domain, "ok").Inc()
+		heartbeatSuppressedTotal.WithLabelValues(domain).Inc()
+		slog.Info("heartbeat: go-native check — nothing due",
+			"domain", domain)
+		if observeChannel != "" && botToken != "" {
+			postSlackMessageFromService(botToken, observeChannel,
+				fmt.Sprintf(":white_check_mark: *%s* heartbeat OK (go-native)", domain))
+		}
+		return
+	}
+
+	heartbeatExecutionsTotal.WithLabelValues(domain, "alert").Inc()
+	skillList := strings.Join(newDue, ", ")
+	slog.Info("heartbeat: go-native check — skills due",
+		"domain", domain, "skills", skillList)
+
+	if observeChannel != "" && botToken != "" {
+		postSlackMessageFromService(botToken, observeChannel,
+			fmt.Sprintf(":heartbeat: *%d skill(s) due:* %s", len(newDue), skillList))
+	}
+
+	for _, skill := range newDue {
+		go h.triggerDueSkill(domain, skill, observeChannel, botToken)
+	}
+}
+
+// runLLMHeartbeat is the original LLM-based heartbeat path (fallback).
+func (h *HeartbeatRunner) runLLMHeartbeat(ctx context.Context, agent config.AgentHeartbeatEntry) {
+	domain := agent.Domain
+
+	slog.Info("heartbeat: executing (llm fallback)",
 		"domain", domain,
 		"coordinator", agent.Coordinator)
 
@@ -192,7 +261,6 @@ func (h *HeartbeatRunner) runHeartbeat(ctx context.Context, agent config.AgentHe
 		heartbeatSuppressedTotal.WithLabelValues(domain).Inc()
 		slog.Info("heartbeat: HEARTBEAT_OK — suppressed",
 			"domain", domain, "duration_s", duration)
-		// Notify observe channel even when suppressed
 		if ch := agent.Heartbeat.Observe; ch != "" {
 			if token := h.findBotToken(domain); token != "" {
 				postSlackMessageFromService(token, ch,
@@ -208,6 +276,67 @@ func (h *HeartbeatRunner) runHeartbeat(ctx context.Context, agent config.AgentHe
 		"output_len", len(output))
 
 	h.deliverAlert(agent, output)
+}
+
+// checkDueSkills evaluates schedule rules against the given time and returns due skill names.
+func checkDueSkills(rules []config.ScheduleRule, now time.Time) []string {
+	weekday := int(now.Weekday()) // 0=Sun, 1=Mon, ..., 6=Sat
+	nowMinutes := now.Hour()*60 + now.Minute()
+
+	seen := make(map[string]bool)
+	var due []string
+
+	for _, rule := range rules {
+		if !dayMatches(rule.Days, weekday) {
+			continue
+		}
+		if !timeInWindow(rule.Time, nowMinutes) {
+			continue
+		}
+		if !seen[rule.Skill] {
+			seen[rule.Skill] = true
+			due = append(due, rule.Skill)
+		}
+	}
+	return due
+}
+
+// dayMatches returns true if weekday is in the allowed days list.
+func dayMatches(days []int, weekday int) bool {
+	for _, d := range days {
+		if d == weekday {
+			return true
+		}
+	}
+	return false
+}
+
+// timeInWindow checks if nowMinutes falls within a "HH:MM-HH:MM" window.
+func timeInWindow(window string, nowMinutes int) bool {
+	parts := strings.SplitN(window, "-", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	startH, startM := parseHHMM(parts[0])
+	endH, endM := parseHHMM(parts[1])
+
+	startMin := startH*60 + startM
+	endMin := endH*60 + endM
+
+	if startMin <= endMin {
+		return nowMinutes >= startMin && nowMinutes < endMin
+	}
+	// Wraps midnight
+	return nowMinutes >= startMin || nowMinutes < endMin
+}
+
+// resolveNow returns the current time in the agent's configured timezone.
+func (h *HeartbeatRunner) resolveNow(timezone string) time.Time {
+	loc, err := time.LoadLocation(timezone)
+	if err != nil {
+		loc = time.UTC
+	}
+	return time.Now().In(loc)
 }
 
 // extractHeartbeatOutput pulls the output from the executor response.
