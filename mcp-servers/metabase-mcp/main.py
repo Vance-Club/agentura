@@ -121,7 +121,7 @@ TOOLS = [
     },
     {
         "name": "create_metabase_card",
-        "description": "Create a saved question (card) with a native SQL query. Returns card_id.",
+        "description": "Create a saved question (card) with a native SQL query. If dashboard_id is provided, the card is automatically added to that dashboard.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -129,6 +129,7 @@ TOOLS = [
                 "database_id": {"type": "integer", "description": "Database to query"},
                 "query": {"type": "string", "description": "Native SQL query"},
                 "display": {"type": "string", "description": "Visualization type: table, bar, line, pie, area, scalar, row, funnel, map", "default": "table"},
+                "dashboard_id": {"type": "integer", "description": "Dashboard to auto-add this card to (optional). Cards are laid out in a 2-column grid."},
                 "collection_id": {"type": "integer", "description": "Collection to save card in (optional)"},
                 "description": {"type": "string", "description": "Card description (optional)"},
             },
@@ -326,6 +327,9 @@ def _create_dashboard(args: dict) -> str:
     return json.dumps({"id": data["id"], "name": data["name"], "url": f"{METABASE_URL}/dashboard/{data['id']}", "reused": False})
 
 
+_dashboard_card_count: dict[int, int] = {}
+
+
 def _create_card(args: dict) -> str:
     body = {
         "name": args["name"],
@@ -342,7 +346,21 @@ def _create_card(args: dict) -> str:
     if args.get("description"):
         body["description"] = args["description"]
     data = _post("/card", body)
-    return json.dumps({"id": data["id"], "name": data["name"], "display": data.get("display", "")})
+    card_id = data["id"]
+    result = {"id": card_id, "name": data["name"], "display": data.get("display", "")}
+    # Auto-add to dashboard if requested
+    dashboard_id = args.get("dashboard_id")
+    if dashboard_id:
+        idx = _dashboard_card_count.get(dashboard_id, 0)
+        col = (idx % 2) * 9       # 2-column grid: 0 or 9
+        row = (idx // 2) * 6      # each row is 6 units tall
+        add_body = {"cardId": card_id, "row": row, "col": col, "size_x": 9, "size_y": 6}
+        dc = _post(f"/dashboard/{dashboard_id}/cards", add_body)
+        _dashboard_card_count[dashboard_id] = idx + 1
+        result["dashboard_id"] = dashboard_id
+        result["dashcard_id"] = dc.get("id")
+        result["position"] = {"row": row, "col": col}
+    return json.dumps(result)
 
 
 def _add_card_to_dashboard(args: dict) -> str:
