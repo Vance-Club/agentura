@@ -270,6 +270,7 @@ def get_registry() -> MCPRegistry:
         "postgres": os.environ.get("MCP_POSTGRES_URL", ""),
         "databricks": os.environ.get("MCP_DATABRICKS_URL", ""),
         "clickup": os.environ.get("MCP_CLICKUP_URL", ""),
+        "gmail": os.environ.get("MCP_GMAIL_URL", ""),
     }
     for name, url in _well_known.items():
         if url:

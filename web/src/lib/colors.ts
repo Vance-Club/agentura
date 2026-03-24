@@ -31,6 +31,11 @@ export const domainColors: Record<string, { bg: string; border: string; text: st
     border: "border-rose-300 dark:border-rose-500/30",
     text: "text-rose-700 dark:text-rose-400",
   },
+  finance: {
+    bg: "bg-cyan-50 dark:bg-cyan-500/10",
+    border: "border-cyan-300 dark:border-cyan-500/30",
+    text: "text-cyan-700 dark:text-cyan-400",
+  },
 };
 
 export const domainFallback = {
@@ -46,6 +51,7 @@ export const domainLabels: Record<string, string> = {
   growth: "Growth Analytics",
   pm: "Product Management",
   dev: "Engineering",
+  finance: "Finance Ops",
 };
 
 export const domainLabelsLong: Record<string, string> = {
@@ -55,6 +61,7 @@ export const domainLabelsLong: Record<string, string> = {
   growth: "Growth Analytics (Sentinel)",
   pm: "Product Management",
   dev: "Engineering",
+  finance: "Finance Operations (FinOps)",
 };
 
 /** Agent card gradient backgrounds (used in agents list - light gets white card + left border) */
@@ -65,6 +72,7 @@ export const domainCardAccent: Record<string, string> = {
   growth: "border-l-teal-400",
   pm: "border-l-blue-400",
   dev: "border-l-rose-400",
+  finance: "border-l-cyan-400",
 };
 
 export const roleColors: Record<string, string> = {
@@ -179,6 +187,7 @@ export const orgChartDomainColors: Record<string, string> = {
   growth: "border-teal-300 bg-teal-50 dark:border-teal-500/40 dark:bg-teal-500/10",
   pm: "border-blue-300 bg-blue-50 dark:border-blue-500/40 dark:bg-blue-500/10",
   dev: "border-rose-300 bg-rose-50 dark:border-rose-500/40 dark:bg-rose-500/10",
+  finance: "border-cyan-300 bg-cyan-50 dark:border-cyan-500/40 dark:bg-cyan-500/10",
 };
 
 export const traceBorderColors: Record<string, string> = {

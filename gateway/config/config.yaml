@@ -312,6 +312,43 @@ triggers:
             extract:
               input: "{question}"
             description: "D0 activation, signup funnel, referral quality"
+      - name: finance
+        signing_secret: "${SLACK_FINANCE_SIGNING_SECRET}"
+        bot_token: "${SLACK_FINANCE_BOT_TOKEN}"
+        app_token: "${SLACK_FINANCE_APP_TOKEN}"
+        mode: "socket"
+        domain_scope: "finance"
+        allowed_skills: ["*"]
+        ack_reaction: "eyes"
+        typing_reaction: "hourglass_flowing_sand"
+        dm:
+          policy: "open"
+        events:
+          message: true
+          app_mention: true
+          reaction: true
+        commands:
+          - pattern: "invoice {details}"
+            skill: "finops-assistant"
+            description: "Process or analyze an invoice"
+          - pattern: "validate {details}"
+            skill: "agreement-validator"
+            description: "Validate vendor payments against agreements"
+          - pattern: "tasks"
+            skill: "task-tracker"
+            description: "Scan and track finance tasks"
+          - pattern: "import {details}"
+            skill: "data-ingestion"
+            description: "Import P&L data"
+          - pattern: "scan inbox"
+            skill: "finops-assistant"
+            description: "Scan finance inbox for actionable items"
+          - pattern: "overdue"
+            skill: "task-tracker"
+            description: "Show overdue finance tasks"
+          - pattern: "reconcile {details}"
+            skill: "agreement-validator"
+            description: "Reconcile vendor payments"
       - name: ge
         signing_secret: "${SLACK_GE_SIGNING_SECRET}"
         bot_token: "${SLACK_GE_BOT_TOKEN}"
@@ -361,6 +398,20 @@ triggers:
             description: "Ask a question about GE project"
 
 agents:
+  - domain: finance
+    coordinator: finance-coordinator
+    heartbeat:
+      every: "4h"
+      target: "${FINANCE_HEARTBEAT_CHANNEL}"
+      model: "anthropic/claude-sonnet-4-5-20250929"
+      light_context: true
+      isolated_session: true
+      silent: true
+      active_hours:
+        start: "03:00"
+        end: "17:00"
+        timezone: "UTC"
+      ack_max_chars: 300
   - domain: growth
     coordinator: growth-coordinator
     heartbeat:
