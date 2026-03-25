@@ -299,14 +299,7 @@ def _find_dashboard_by_name(name: str, collection_id: int | None = None) -> dict
 
 def _clear_dashboard_cards(dashboard_id: int) -> None:
     """Remove all cards from a dashboard so it can be repopulated."""
-    dash = _get(f"/dashboard/{dashboard_id}")
-    for dc in dash.get("dashcards", []):
-        httpx.delete(
-            f"{METABASE_URL}/api/dashboard/{dashboard_id}/cards",
-            headers=_headers(),
-            params={"dashcardId": dc["id"]},
-            timeout=15,
-        )
+    _put(f"/dashboard/{dashboard_id}/cards", {"cards": []})
 
 
 def _create_dashboard(args: dict) -> str:
@@ -328,6 +321,34 @@ def _create_dashboard(args: dict) -> str:
 
 
 _dashboard_card_count: dict[int, int] = {}
+
+
+def _add_card_to_dashboard_v2(dashboard_id: int, card_id: int, row: int, col: int,
+                                size_x: int = 9, size_y: int = 6) -> dict:
+    """Add a card to a dashboard using Metabase v0.44+ PUT API."""
+    dash = _get(f"/dashboard/{dashboard_id}")
+    existing = []
+    for dc in dash.get("dashcards", []):
+        existing.append({
+            "id": dc["id"],
+            "card_id": dc.get("card", {}).get("id") or dc.get("card_id"),
+            "row": dc.get("row", 0),
+            "col": dc.get("col", 0),
+            "size_x": dc.get("size_x", 9),
+            "size_y": dc.get("size_y", 6),
+        })
+    existing.append({
+        "id": -1,
+        "card_id": card_id,
+        "row": row,
+        "col": col,
+        "size_x": size_x,
+        "size_y": size_y,
+    })
+    resp = _put(f"/dashboard/{dashboard_id}/cards", {"cards": existing})
+    new_cards = resp.get("cards", [])
+    added = next((c for c in new_cards if c.get("card", {}).get("id") == card_id), None)
+    return added or {}
 
 
 def _create_card(args: dict) -> str:
@@ -354,8 +375,7 @@ def _create_card(args: dict) -> str:
         idx = _dashboard_card_count.get(dashboard_id, 0)
         col = (idx % 2) * 9       # 2-column grid: 0 or 9
         row = (idx // 2) * 6      # each row is 6 units tall
-        add_body = {"cardId": card_id, "row": row, "col": col, "size_x": 9, "size_y": 6}
-        dc = _post(f"/dashboard/{dashboard_id}/cards", add_body)
+        dc = _add_card_to_dashboard_v2(dashboard_id, card_id, row, col)
         _dashboard_card_count[dashboard_id] = idx + 1
         result["dashboard_id"] = dashboard_id
         result["dashcard_id"] = dc.get("id")
@@ -365,15 +385,15 @@ def _create_card(args: dict) -> str:
 
 def _add_card_to_dashboard(args: dict) -> str:
     dashboard_id = args["dashboard_id"]
-    body = {
-        "cardId": args["card_id"],
-        "row": args.get("row", 0),
-        "col": args.get("col", 0),
-        "size_x": args.get("size_x", 9),
-        "size_y": args.get("size_y", 6),
-    }
-    data = _post(f"/dashboard/{dashboard_id}/cards", body)
-    return json.dumps({"ok": True, "dashcard_id": data.get("id"), "dashboard_id": dashboard_id})
+    dc = _add_card_to_dashboard_v2(
+        dashboard_id,
+        args["card_id"],
+        args.get("row", 0),
+        args.get("col", 0),
+        args.get("size_x", 9),
+        args.get("size_y", 6),
+    )
+    return json.dumps({"ok": True, "dashcard_id": dc.get("id"), "dashboard_id": dashboard_id})
 
 
 def _create_collection(args: dict) -> str:
