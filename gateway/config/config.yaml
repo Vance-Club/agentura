@@ -379,7 +379,7 @@ agents:
   - domain: ecm
     coordinator: ecm-coordinator
     heartbeat:
-      every: "2h"
+      every: "12h"
       target: "${ECM_HEARTBEAT_CHANNEL}"
       model: "anthropic/claude-sonnet-4-5-20250929"
       light_context: true
