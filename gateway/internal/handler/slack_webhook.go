@@ -1393,7 +1393,7 @@ func renderRichOutputToBlocks(rich map[string]any) []map[string]any {
 			"type": "section",
 			"text": map[string]any{
 				"type": "mrkdwn",
-				"text": summary,
+				"text": markdownToSlackMrkdwn(summary),
 			},
 		})
 	}
@@ -1414,9 +1414,9 @@ func renderRichOutputToBlocks(rich map[string]any) []map[string]any {
 			heading, _ := section["heading"].(string)
 			body, _ := section["body"].(string)
 
-			text := body
+			text := markdownToSlackMrkdwn(body)
 			if heading != "" {
-				text = "*" + heading + "*\n" + body
+				text = "*" + heading + "*\n" + text
 			}
 			if text == "" {
 				continue
