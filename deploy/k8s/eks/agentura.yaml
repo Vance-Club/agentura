@@ -299,6 +299,10 @@ spec:
               value: "4"
             - name: CLAUDE_CODE_WORKER_IMAGE
               value: 441250065216.dkr.ecr.ap-south-1.amazonaws.com/agentura/claude-code-worker:latest
+            - name: CLAUDE_CODE_WORKER_CPU
+              value: "1"
+            - name: CLAUDE_CODE_WORKER_MEMORY
+              value: "1024Mi"
           envFrom:
             - secretRef:
                 name: agentura-api-keys
