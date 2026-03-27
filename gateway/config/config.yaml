@@ -282,6 +282,9 @@ triggers:
             extract:
               input: "Watch {corridor} corridor for 7 days"
             description: "Set a daily corridor watch"
+          - pattern: "strategic signals"
+            skill: "strategic-signals"
+            description: "Grove inflection point scan across 5 structural signals"
           - pattern: "retention {question}"
             skill: "retention-analyst"
             extract:
