@@ -122,9 +122,12 @@ func (m *SlackSocketManager) handleEventsAPI(app *config.SlackAppConfig, evtAPI 
 		if !m.isEventEnabled(app, "message") {
 			return
 		}
-		// When app_mention is also enabled, skip channel messages to avoid
-		// processing the same @mention twice (Slack fires both events).
-		if app.Events.AppMention && !isDM(ev.ChannelType) {
+		// When app_mention is also enabled, skip channel messages that
+		// contain a bot @mention to avoid processing the same mention
+		// twice (Slack fires both message and app_mention events).
+		// Non-mention channel messages (e.g. command aliases like
+		// "funnel", "pulse") must pass through.
+		if app.Events.AppMention && !isDM(ev.ChannelType) && strings.HasPrefix(ev.Text, "<@") {
 			return
 		}
 		m.handleSocketMessage(app, ev.Channel, ev.ChannelType, ev.User, ev.Text, ev.TimeStamp, ev.ThreadTimeStamp)
