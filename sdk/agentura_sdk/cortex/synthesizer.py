@@ -27,6 +27,7 @@ class SynthesisCandidate:
     applies_when: str
     pattern_count: int
     skill: str
+    scope: str = "skill"
 
 
 @dataclass
@@ -57,10 +58,16 @@ Return a JSON array of objects:
     "rule": "Always do X when Y",
     "applies_when": "condition when this rule applies",
     "pattern_count": 3,
-    "skill": "domain/skill-name"
+    "skill": "domain/skill-name",
+    "scope": "skill"
   }}
 ]
 ```
+
+For the "scope" field, use:
+- "skill" if the rule is specific to one skill
+- "domain" if the pattern appears across multiple skills in the same domain
+- "org" if the pattern applies to all skills regardless of domain
 
 Return ONLY the JSON array. No explanation. If no patterns found, return `[]`."""
 
@@ -161,6 +168,7 @@ def synthesize(
                     "applies_when": c.applies_when,
                     "confidence": 0.5,
                     "source": "synthesis",
+                    "scope": c.scope,
                 })
                 result.stored_count += 1
             except Exception:
@@ -259,10 +267,14 @@ def _parse_candidates(raw: str) -> list[SynthesisCandidate]:
     for item in items:
         if not isinstance(item, dict):
             continue
+        scope = item.get("scope", "skill")
+        if scope not in ("skill", "domain", "org"):
+            scope = "skill"
         candidates.append(SynthesisCandidate(
             rule=item.get("rule", ""),
             applies_when=item.get("applies_when", ""),
             pattern_count=item.get("pattern_count", 1),
             skill=item.get("skill", ""),
+            scope=scope,
         ))
     return candidates
