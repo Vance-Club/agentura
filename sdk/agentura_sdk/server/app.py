@@ -2150,6 +2150,40 @@ def cortex_synthesize(req: SynthesizeRequest):
     )
 
 
+class CreateReflexionRequest(BaseModel):
+    skill: str
+    rule: str
+    applies_when: str = ""
+    confidence: float = 0.5
+    scope: str = "skill"
+
+
+class CreateReflexionResponse(BaseModel):
+    reflexion_id: str
+    scope: str
+
+
+@app.post("/api/v1/reflexions", response_model=CreateReflexionResponse)
+def create_reflexion(req: CreateReflexionRequest):
+    """Create a scoped reflexion rule (skill/domain/org)."""
+    if req.scope not in ("skill", "domain", "org"):
+        raise HTTPException(status_code=400, detail="scope must be skill, domain, or org")
+    if not req.rule.strip():
+        raise HTTPException(status_code=400, detail="rule is required")
+
+    from agentura_sdk.memory import get_memory_store
+
+    store = get_memory_store()
+    reflexion_id = store.add_reflexion(req.skill, {
+        "rule": req.rule,
+        "applies_when": req.applies_when,
+        "confidence": req.confidence,
+        "scope": req.scope,
+        "source": "api",
+    })
+    return CreateReflexionResponse(reflexion_id=reflexion_id, scope=req.scope)
+
+
 class MaintenanceResponse(BaseModel):
     synthesis: SynthesizeResponse
     decayed_count: int = 0

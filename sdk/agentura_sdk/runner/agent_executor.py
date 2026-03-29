@@ -464,7 +464,11 @@ def _recall_memories(skill_path: str, input_data: dict) -> str:
             except Exception:
                 pass
             try:
-                reflexions = store.get_reflexions(skill_path)
+                # Prefer scope-aware retrieval (cross-agent learning)
+                if hasattr(store, "get_top_reflexions_with_scope"):
+                    reflexions = store.get_top_reflexions_with_scope(skill_path, limit=3, min_score=0.3)
+                else:
+                    reflexions = store.get_reflexions(skill_path)
                 for r in reflexions[:3]:
                     text = r.get("rule", "")
                     if text:

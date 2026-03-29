@@ -34,6 +34,7 @@ class MemoryStore(Protocol):
     def record_reflexion_injection(self, execution_id: str, reflexion_ids: list[str]) -> None: ...
     def record_execution_success(self, execution_id: str) -> None: ...
     def get_top_reflexions(self, skill_path: str, limit: int = 5, min_score: float = 0.3) -> list[dict]: ...
+    def get_top_reflexions_with_scope(self, skill_path: str, limit: int = 5, min_score: float = 0.3) -> list[dict]: ...
     # Incident-to-eval (DEC-067)
     def log_failure_case(self, skill_path: str, data: dict) -> str: ...
     # Approval engine
@@ -125,6 +126,11 @@ class CompositeStore:
         if hasattr(self._pg, "get_top_reflexions"):
             return self._pg.get_top_reflexions(skill_path, limit, min_score)
         return self._pg.get_reflexions(skill_path)[:limit]
+
+    def get_top_reflexions_with_scope(self, skill_path: str, limit: int = 5, min_score: float = 0.3) -> list[dict]:
+        if hasattr(self._pg, "get_top_reflexions_with_scope"):
+            return self._pg.get_top_reflexions_with_scope(skill_path, limit, min_score)
+        return self.get_top_reflexions(skill_path, limit, min_score)
 
     def log_failure_case(self, skill_path: str, data: dict) -> str:
         if hasattr(self._pg, "log_failure_case"):

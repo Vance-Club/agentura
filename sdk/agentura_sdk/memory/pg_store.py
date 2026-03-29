@@ -145,6 +145,10 @@ ALTER TABLE executions ADD COLUMN IF NOT EXISTS pending_approvals JSONB DEFAULT 
 -- RBAC: track who triggered each execution
 ALTER TABLE executions ADD COLUMN IF NOT EXISTS triggered_by VARCHAR(200) DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_executions_triggered_by ON executions(triggered_by);
+
+-- Cross-agent learning: reflexion scope (skill | domain | org)
+ALTER TABLE reflexions ADD COLUMN IF NOT EXISTS scope VARCHAR(10) DEFAULT 'skill';
+CREATE INDEX IF NOT EXISTS idx_reflexions_scope ON reflexions(scope);
 """
 
 
@@ -370,11 +374,14 @@ class PgStore:
                 )
                 count = cur.fetchone()[0]
                 reflexion_id = data.get("reflexion_id", f"REFL-{count + 1:03d}")
+                scope = data.get("scope", "skill")
+                if scope not in ("skill", "domain", "org"):
+                    scope = "skill"
                 cur.execute(
                     """INSERT INTO reflexions
                        (reflexion_id, domain, workspace_id, skill, correction_id,
-                        created_at, rule, applies_when, confidence, validated_by_test)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        created_at, rule, applies_when, confidence, validated_by_test, scope)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                        ON CONFLICT (reflexion_id) DO NOTHING""",
                     (
                         reflexion_id,
@@ -389,6 +396,7 @@ class PgStore:
                         data.get("applies_when", ""),
                         data.get("confidence", 0.0),
                         data.get("validated_by_test", False),
+                        scope,
                     ),
                 )
             conn.commit()
@@ -494,7 +502,7 @@ class PgStore:
         if not updates:
             return
         allowed = {"rule", "applies_when", "confidence", "validated_by_test",
-                   "utility_score", "times_injected", "times_helped", "source"}
+                   "utility_score", "times_injected", "times_helped", "source", "scope"}
         set_parts = []
         values: list[object] = []
         for key, value in updates.items():
@@ -578,6 +586,51 @@ class PgStore:
                     (skill_path, self._workspace_id, min_score, limit),
                 )
                 return [self._deserialize_row(row) for row in cur.fetchall()]
+        finally:
+            self._pool.putconn(conn)
+
+    def get_top_reflexions_with_scope(
+        self, skill_path: str, limit: int = 5, min_score: float = 0.3
+    ) -> list[dict]:
+        """Retrieve reflexions across skill/domain/org scopes, prioritized.
+
+        Returns reflexions matching:
+        - scope='skill' AND skill = skill_path (priority 1)
+        - scope='domain' AND domain = extracted_domain (priority 2)
+        - scope='org' (priority 3)
+        Ordered by scope priority ASC, utility_score DESC.
+        """
+        domain = self._domain_from_skill(skill_path)
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """SELECT *,
+                            CASE scope
+                                WHEN 'skill'  THEN 1
+                                WHEN 'domain' THEN 2
+                                WHEN 'org'    THEN 3
+                                ELSE 4
+                            END AS scope_priority
+                       FROM reflexions
+                       WHERE workspace_id = %s
+                         AND utility_score >= %s
+                         AND (
+                             (scope = 'skill' AND skill = %s)
+                             OR (scope = 'domain' AND domain = %s)
+                             OR (scope = 'org')
+                         )
+                       ORDER BY scope_priority ASC, utility_score DESC, confidence DESC
+                       LIMIT %s""",
+                    (self._workspace_id, min_score, skill_path, domain, limit),
+                )
+                rows = cur.fetchall()
+                results = []
+                for row in rows:
+                    d = self._deserialize_row(row)
+                    d.pop("scope_priority", None)
+                    results.append(d)
+                return results
         finally:
             self._pool.putconn(conn)
 
