@@ -150,18 +150,26 @@ def load_reflexion_entries(skill_path: Path) -> tuple[str, list[str]]:
 
         badge = " [validated]" if validated else ""
         source_badge = f" [{source}]" if source and source != "correction" else ""
-        lines.append(f"- **{rid}** (confidence: {confidence:.0%}{badge}{source_badge}): {rule}")
+        scope = entry.get("scope", "skill")
+        scope_badge = f" [{scope}]" if scope and scope != "skill" else ""
+        lines.append(f"- **{rid}** (confidence: {confidence:.0%}{badge}{source_badge}{scope_badge}): {rule}")
         if applies:
             lines.append(f"  _Applies when_: {applies}")
     return "\n".join(lines), reflexion_ids
 
 
 def _load_reflexions_from_store(skill_name_full: str) -> list[dict]:
-    """Try loading utility-scored reflexions from the memory store (PgStore/CompositeStore)."""
+    """Try loading utility-scored reflexions from the memory store (PgStore/CompositeStore).
+
+    Prefers scope-aware retrieval (skill + domain + org) when available,
+    falls back to skill-only get_top_reflexions for backward compat.
+    """
     try:
         from agentura_sdk.memory import get_memory_store
 
         store = get_memory_store()
+        if hasattr(store, "get_top_reflexions_with_scope"):
+            return store.get_top_reflexions_with_scope(skill_name_full, limit=5, min_score=0.3)
         if hasattr(store, "get_top_reflexions"):
             return store.get_top_reflexions(skill_name_full, limit=5, min_score=0.3)
     except Exception:

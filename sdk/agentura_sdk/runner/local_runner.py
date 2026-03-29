@@ -133,13 +133,42 @@ def _estimate_anthropic_cost(model_name: str, input_tokens: int, output_tokens: 
     return round(input_cost + output_cost, 6)
 
 
+_failure_counts: dict[str, int] = {}
+_SYNTHESIS_THRESHOLD = 3
+
+
+def _maybe_trigger_synthesis(skill_path: str) -> None:
+    """Fire synthesis in a daemon thread after repeated failures (DEC-067 pattern)."""
+    import threading
+
+    def _run():
+        try:
+            from agentura_sdk.cortex.synthesizer import synthesize
+            synthesize(skill_filter=skill_path, since_hours=24)
+        except Exception:
+            pass
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+
+
 def _post_execution_hook(ctx: SkillContext, result: SkillResult) -> None:
-    """Fire-and-forget post-execution actions (incident-to-eval, etc.)."""
+    """Fire-and-forget post-execution actions (incident-to-eval, reactive synthesis)."""
+    skill_path = f"{ctx.domain}/{ctx.skill_name}"
+
+    # Reactive synthesis: track failures, trigger after threshold
+    if result.success:
+        _failure_counts.pop(skill_path, None)
+    else:
+        _failure_counts[skill_path] = _failure_counts.get(skill_path, 0) + 1
+        if _failure_counts[skill_path] >= _SYNTHESIS_THRESHOLD:
+            _failure_counts[skill_path] = 0
+            _maybe_trigger_synthesis(skill_path)
+
     try:
         from agentura_sdk.testing.incident_eval import maybe_generate_failure_tests
 
         skills_dir = Path(os.environ.get("SKILLS_DIR", "/skills"))
-        # Also try walking up from CWD
         if not skills_dir.exists():
             cwd = Path.cwd()
             for parent in [cwd, *cwd.parents]:

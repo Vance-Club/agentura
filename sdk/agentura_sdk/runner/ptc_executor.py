@@ -200,9 +200,12 @@ async def execute_ptc(ctx: SkillContext) -> SkillResult:
             tool_names = ", ".join(p.get("tool", "unknown") for p in pending)
             pending_action = f"Approve {len(pending)} action(s): {tool_names}"
 
+        # MemRL fix: infer success from iterations when worker doesn't explicitly report it
+        success = result_data.get("success", False) or (len(iterations) > 0 and not error_msg)
+
         return SkillResult(
             skill_name=ctx.skill_name,
-            success=result_data.get("success", False),
+            success=success,
             output=output,
             reasoning_trace=[
                 f"PTC Worker: {len(iterations)} tool calls",
@@ -297,9 +300,12 @@ async def execute_ptc_streaming(
             tool_names = ", ".join(p.get("tool", "unknown") for p in pending)
             pending_action = f"Approve {len(pending)} action(s): {tool_names}"
 
+        # MemRL fix: infer success from iterations when worker doesn't explicitly report it
+        success = result_data.get("success", False) or (len(iterations) > 0 and not error_msg)
+
         yield SkillResult(
             skill_name=ctx.skill_name,
-            success=result_data.get("success", False),
+            success=success,
             output=output,
             reasoning_trace=[
                 f"PTC Worker: {len(iterations)} tool calls",

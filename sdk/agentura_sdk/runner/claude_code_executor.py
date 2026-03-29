@@ -241,9 +241,13 @@ async def execute_claude_code(ctx: SkillContext) -> SkillResult:
         if artifacts:
             context_for_next["artifacts"] = artifacts
 
+        # MemRL fix: infer success from iterations when worker doesn't explicitly report it
+        error_msg = result_data.get("error", "")
+        success = result_data.get("success", False) or (len(iterations) > 0 and not error_msg)
+
         return SkillResult(
             skill_name=ctx.skill_name,
-            success=result_data.get("success", False),
+            success=success,
             output=output,
             reasoning_trace=[
                 f"Claude Code Worker: {len(iterations)} tool calls",
@@ -333,9 +337,13 @@ async def execute_claude_code_streaming(
         if artifacts:
             context_for_next["artifacts"] = artifacts
 
+        # MemRL fix: infer success from iterations when worker doesn't explicitly report it
+        error_msg = result_data.get("error", "")
+        success = result_data.get("success", False) or (len(iterations) > 0 and not error_msg)
+
         yield SkillResult(
             skill_name=ctx.skill_name,
-            success=result_data.get("success", False),
+            success=success,
             output=output,
             reasoning_trace=[
                 f"Claude Code Worker: {len(iterations)} tool calls",

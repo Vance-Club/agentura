@@ -313,3 +313,9 @@
 **Over**: Sequential chaining, single monolithic skill
 **Why**: Independent analyses (volume + margin + lapse) have no data dependencies — parallel execution cuts wall-clock time by ~3x
 **Constraint**: Fan-in aggregation not yet implemented (no reporter step); each skill posts independently
+
+## DEC-096: Cross-agent learning via scoped reflexions (2026-03-29)
+**Chose**: `scope` column on reflexions (skill|domain|org) with single-query retrieval using CASE priority ordering
+**Over**: Separate tables per scope level, tag-based matching, separate inheritance chain
+**Why**: Single column + single SQL query keeps it simple; backward-compatible (default scope='skill' matches existing behavior); `domain` column already exists on all reflexions; no schema migration needed beyond ALTER TABLE ADD COLUMN IF NOT EXISTS
+**Constraint**: Limit 5 reflexions per skill execution (across all scopes) to avoid prompt bloat; org-scope reflexions must be created explicitly via API (never auto-generated)
