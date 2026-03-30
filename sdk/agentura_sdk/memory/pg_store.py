@@ -380,8 +380,8 @@ class PgStore:
                 cur.execute(
                     """INSERT INTO reflexions
                        (reflexion_id, domain, workspace_id, skill, correction_id,
-                        created_at, rule, applies_when, confidence, validated_by_test, scope)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        created_at, rule, applies_when, confidence, validated_by_test, scope, source)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                        ON CONFLICT (reflexion_id) DO NOTHING""",
                     (
                         reflexion_id,
@@ -397,6 +397,7 @@ class PgStore:
                         data.get("confidence", 0.0),
                         data.get("validated_by_test", False),
                         scope,
+                        data.get("source", "correction"),
                     ),
                 )
             conn.commit()

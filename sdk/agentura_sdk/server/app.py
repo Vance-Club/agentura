@@ -1478,6 +1478,7 @@ class KnowledgeReflexionEntry(BaseModel):
     times_injected: int = 0
     times_helped: int = 0
     source: str = "correction"
+    scope: str = "skill"
 
 
 class KnowledgeCorrectionEntry(BaseModel):
@@ -1595,6 +1596,7 @@ def list_reflexions(skill: str | None = None, domains: set[str] | None = Depends
             times_injected=e.get("times_injected", 0),
             times_helped=e.get("times_helped", 0),
             source=e.get("source", "correction"),
+            scope=e.get("scope", "skill"),
         )
         for e in entries
     ]
