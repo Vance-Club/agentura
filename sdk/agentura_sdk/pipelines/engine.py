@@ -595,10 +595,11 @@ async def run_pipeline(name: str, pipeline_input: dict[str, Any]) -> dict[str, A
             total_expected += len(phase.steps)
 
             # For fan-in phases, strip large fields (diff, changed_files) that
-            # upstream phases already consumed.  Downstream skills only need
-            # agent_results + lightweight PR metadata — not the raw diff which
-            # can blow past the 200K token context limit.
-            if phase.fan_in_from:
+            # Strip diff from fan-in phases that DON'T need it (verify, report).
+            # Keep diff for phases that DO need it (analyze, deep-analyze).
+            # Heuristic: strip diff only if carry_forward already has agent_results
+            # (meaning a previous phase already consumed the diff and produced findings).
+            if phase.fan_in_from and "agent_results" in carry_forward:
                 phase_input = {
                     k: v for k, v in normalized.items()
                     if k not in ("diff", "changed_files")
