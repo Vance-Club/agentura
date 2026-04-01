@@ -436,7 +436,7 @@ def _extract_reviewer_output(all_results: list[dict]) -> dict[str, Any]:
         skill = r.get("skill", "")
         success = r.get("success") or r.get("status") == "success"
         logger.debug("checking result: skill=%s success=%s has_output=%s", skill, success, bool(r.get("output")))
-        if skill == "dev/pr-code-reviewer" and success:
+        if skill in ("dev/pr-code-reviewer", "dev/pr-deep-reviewer") and success:
             output = r.get("output", {})
             # Output may be nested under raw_output as JSON in a markdown code block
             if isinstance(output, dict) and "findings" in output:
@@ -647,8 +647,37 @@ async def run_pipeline(name: str, pipeline_input: dict[str, Any]) -> dict[str, A
                 # structured data so downstream phases don't get bloated strings.
                 carry_forward["agent_results"] = _compact_agent_results(phase_results)
             else:
+                # Register agents in fleet store for sequential phases too
+                if store and session_id:
+                    for step in phase.steps:
+                        aid = step.agent_id or step.skill.replace("/", "-")
+                        try:
+                            store.create_agent(session_id, f"{session_id}-{aid}", step.skill)
+                        except Exception:
+                            pass
+
                 seq_results = await _run_flat_steps(phase.steps, phase_input, carry_forward, skills_dir)
                 all_results.extend(seq_results)
+
+                # Update fleet store with per-agent results for sequential phases
+                if store and session_id:
+                    for r in seq_results:
+                        aid = r.get("agent_id", "")
+                        try:
+                            store.update_agent_status(
+                                f"{session_id}-{aid}",
+                                "completed" if r.get("success") else "failed",
+                                execution_id=r.get("execution_id", ""),
+                                success=r.get("success", False),
+                                output=r.get("output"),
+                                cost_usd=r.get("cost_usd", 0),
+                                latency_ms=r.get("latency_ms", 0),
+                            )
+                        except Exception:
+                            pass
+
+                # Propagate agent_results for downstream fan-in phases
+                carry_forward["agent_results"] = _compact_agent_results(seq_results)
 
             # Check for required-step failures — abort remaining phases
             has_required_failure = any(
