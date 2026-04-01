@@ -429,38 +429,55 @@ func (m *SlackSocketManager) listSkills(ctx context.Context, app *config.SlackAp
 }
 
 func (m *SlackSocketManager) dispatchAuto(ctx context.Context, app *config.SlackAppConfig, cmd slackCommand) (string, slackCommand, error) {
-	// Domain-scoped bots: route through triage, then chain to routed skill.
-	if app.DomainScope != "" {
-		inputData := map[string]any{"text": cmd.Text}
-		resp, err := m.executor.Execute(ctx, app.DomainScope, "triage", executor.ExecuteRequest{InputData: inputData, UserID: cmd.UserID})
-		if err != nil {
-			slog.Debug("dispatchAuto: triage call failed", "domain", app.DomainScope, "error", err)
-			return m.helpText(app) + "\n\n_Type `help` to see available commands._", cmd, nil
-		}
-
-		routeTo, entities := parseTriageRoute(resp)
-		// Normalize: if triage returned a bare skill name (no "/"), qualify with domain scope.
-		if routeTo != "" && !strings.Contains(routeTo, "/") {
-			qualified := app.DomainScope + "/" + routeTo
-			slog.Info("dispatchAuto: qualifying bare triage route",
-				"raw", routeTo, "qualified", qualified)
-			routeTo = qualified
-		}
-		if routeTo != "" {
-			routeInput := map[string]any{"text": cmd.Text}
-			for k, v := range entities {
-				routeInput[k] = v
-			}
-			routedCmd := slackCommand{Action: "run", Target: routeTo, Input: routeInput, Text: cmd.Text, UserID: cmd.UserID}
-			result, err := m.dispatchSkill(ctx, app, routedCmd)
-			if err == nil {
-				return result, routedCmd, nil
-			}
-			slog.Error("dispatchAuto: routed skill failed", "skill", routeTo, "error", err)
-			return "", routedCmd, err
-		}
+	if app.DomainScope == "" {
+		return m.helpText(app) + "\n\n_Type `help` to see available commands._", cmd, nil
 	}
-	return m.helpText(app) + "\n\n_Type `help` to see available commands._", cmd, nil
+
+	// Domain-scoped bots: route through triage, then chain to routed skill.
+	inputData := map[string]any{"text": cmd.Text}
+	resp, err := m.executor.Execute(ctx, app.DomainScope, "triage", executor.ExecuteRequest{InputData: inputData, UserID: cmd.UserID})
+	if err != nil {
+		slog.Warn("dispatchAuto: triage failed, falling back to data-query",
+			"domain", app.DomainScope, "error", err)
+	}
+
+	routeTo := ""
+	var entities map[string]any
+	if err == nil {
+		routeTo, entities = parseTriageRoute(resp)
+	}
+
+	// Normalize: if triage returned a bare skill name (no "/"), qualify with domain scope.
+	if routeTo != "" && !strings.Contains(routeTo, "/") {
+		qualified := app.DomainScope + "/" + routeTo
+		slog.Info("dispatchAuto: qualifying bare triage route",
+			"raw", routeTo, "qualified", qualified)
+		routeTo = qualified
+	}
+
+	// If triage didn't produce a route, fall back to data-query (general-purpose).
+	// Never dump help text for natural language — always attempt an answer.
+	if routeTo == "" {
+		routeTo = app.DomainScope + "/data-query"
+		preview := cmd.Text
+		if len(preview) > 80 {
+			preview = preview[:80] + "..."
+		}
+		slog.Info("dispatchAuto: no triage route, falling back to data-query",
+			"domain", app.DomainScope, "text_preview", preview)
+	}
+
+	routeInput := map[string]any{"text": cmd.Text}
+	for k, v := range entities {
+		routeInput[k] = v
+	}
+	routedCmd := slackCommand{Action: "run", Target: routeTo, Input: routeInput, Text: cmd.Text, UserID: cmd.UserID}
+	result, err := m.dispatchSkill(ctx, app, routedCmd)
+	if err != nil {
+		slog.Error("dispatchAuto: routed skill failed", "skill", routeTo, "error", err)
+		return "", routedCmd, err
+	}
+	return result, routedCmd, nil
 }
 
 // checkOAuthConnections queries the executor for the user's OAuth status.
