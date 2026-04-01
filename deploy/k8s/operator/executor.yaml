@@ -52,6 +52,8 @@ spec:
               value: http://k8s-mcp:8090
             - name: MCP_DATABRICKS_URL
               value: http://databricks-mcp:8092
+            - name: MCP_NOTION_URL
+              value: http://notion-mcp:8095
             - name: AGENCY_DIR
               value: /agency
             - name: UVICORN_WORKERS
