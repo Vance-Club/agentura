@@ -624,8 +624,8 @@ func (h *GitHubWebhookHandler) dispatchDeepReview(deliveryID, repo string, prNum
 func (h *GitHubWebhookHandler) enrichPREvent(ctx context.Context, event *domain.GitHubPREvent) {
 	token := h.cfg.Token
 
-	if event.DiffURL != "" {
-		diff, err := fetchDiff(ctx, event.DiffURL, token)
+	if event.Repo != "" && event.PRNumber > 0 {
+		diff, err := fetchDiff(ctx, event.Repo, event.PRNumber, token)
 		if err != nil {
 			slog.Warn("failed to fetch PR diff, proceeding without it",
 				"error", err,
@@ -722,12 +722,15 @@ func (h *GitHubWebhookHandler) fetchPRDetails(ctx context.Context, repo string, 
 	}, nil
 }
 
-// fetchDiff fetches the raw unified diff from the GitHub diff URL.
-func fetchDiff(ctx context.Context, diffURL, token string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, diffURL, nil)
+// fetchDiff fetches the raw unified diff via the GitHub API (works for private repos).
+// Uses the API endpoint with Accept: application/vnd.github.diff instead of the web diff URL.
+func fetchDiff(ctx context.Context, repo string, prNumber int, token string) (string, error) {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/pulls/%d", repo, prNumber)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", fmt.Errorf("creating diff request: %w", err)
 	}
+	req.Header.Set("Accept", "application/vnd.github.diff")
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
