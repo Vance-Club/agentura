@@ -594,12 +594,15 @@ async def run_pipeline(name: str, pipeline_input: dict[str, Any]) -> dict[str, A
         for phase in pipeline.phases:
             total_expected += len(phase.steps)
 
-            # For fan-in phases, strip large fields (diff, changed_files) that
-            # Strip diff from fan-in phases that DON'T need it (verify, report).
-            # Keep diff for phases that DO need it (analyze, deep-analyze).
-            # Heuristic: strip diff only if carry_forward already has agent_results
-            # (meaning a previous phase already consumed the diff and produced findings).
-            if phase.fan_in_from and "agent_results" in carry_forward:
+            # Strip diff from downstream fan-in phases (verify, report) that
+            # only need agent_results. Keep diff for phases that consume it
+            # (analyze, deep-analyze). Heuristic: strip only if the fan-in
+            # source was the analyze/deep-analyze phase (not triage).
+            strip_diff = (
+                phase.fan_in_from
+                and phase.fan_in_from in ("analyze", "deep-analyze")
+            )
+            if strip_diff:
                 phase_input = {
                     k: v for k, v in normalized.items()
                     if k not in ("diff", "changed_files")
