@@ -7,22 +7,35 @@ const (
 	PROpened          PRAction = "opened"
 	PRSynchronize     PRAction = "synchronize"
 	PRReviewRequested PRAction = "review_requested"
+	PRReviewSubmitted PRAction = "submitted"
+	PRLabeled         PRAction = "labeled"
 )
 
 // GitHubPREvent is the normalized payload dispatched to the executor pipeline.
 type GitHubPREvent struct {
-	DeliveryID string   `json:"delivery_id"`
-	Action     PRAction `json:"action"`
-	PRNumber   int      `json:"pr_number"`
-	PRURL      string   `json:"pr_url"`
-	PRTitle    string   `json:"pr_title"`
-	PRBody     string   `json:"pr_body"`
-	DiffURL    string   `json:"diff_url"`
-	HeadBranch string   `json:"head_branch"`
-	BaseBranch string   `json:"base_branch"`
-	HeadSHA    string   `json:"head_sha"`
-	Repo       string   `json:"repo"`
-	Sender     string   `json:"sender"`
+	DeliveryID   string   `json:"delivery_id"`
+	Action       PRAction `json:"action"`
+	PRNumber     int      `json:"pr_number"`
+	PRURL        string   `json:"pr_url"`
+	PRTitle      string   `json:"pr_title"`
+	PRBody       string   `json:"pr_body"`
+	DiffURL      string   `json:"diff_url"`
+	Diff         string   `json:"diff,omitempty"`
+	ChangedFiles []PRFile `json:"changed_files,omitempty"`
+	HeadBranch   string   `json:"head_branch"`
+	BaseBranch   string   `json:"base_branch"`
+	HeadSHA      string   `json:"head_sha"`
+	Repo         string   `json:"repo"`
+	Sender       string   `json:"sender"`
+}
+
+// PRFile represents a single file changed in a pull request.
+type PRFile struct {
+	Filename  string `json:"filename"`
+	Status    string `json:"status"`
+	Additions int    `json:"additions"`
+	Deletions int    `json:"deletions"`
+	Patch     string `json:"patch,omitempty"`
 }
 
 // CommentFeedback is the normalized payload for issue_comment webhook events

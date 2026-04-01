@@ -146,6 +146,7 @@ type SlackEventConfig struct {
 type GitHubWebhookConfig struct {
 	Enabled bool   `yaml:"enabled"`
 	Secret  string `yaml:"secret"`
+	Token   string `yaml:"token"` // GitHub API token for fetching PR diffs and changed files
 }
 
 type CronConfig struct {

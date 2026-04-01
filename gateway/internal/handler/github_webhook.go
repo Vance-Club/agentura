@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -110,6 +111,8 @@ func (h *GitHubWebhookHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	switch event {
 	case "pull_request":
 		h.handlePullRequest(w, body, deliveryID)
+	case "pull_request_review":
+		h.handlePullRequestReview(w, body, deliveryID)
 	case "issue_comment":
 		h.handleIssueComment(w, body, deliveryID)
 	case "issues":
@@ -153,9 +156,38 @@ func (h *GitHubWebhookHandler) handlePullRequest(w http.ResponseWriter, body []b
 	}
 
 	action := domain.PRAction(payload.Action)
+
+	// Handle "ready-to-merge" label → trigger deep review
+	if action == domain.PRLabeled {
+		var labelPayload struct {
+			Label *struct {
+				Name string `json:"name"`
+			} `json:"label"`
+		}
+		_ = json.Unmarshal(body, &labelPayload)
+		if labelPayload.Label != nil && labelPayload.Label.Name == "ready-to-merge" {
+			slog.Info("github ready-to-merge label added",
+				"delivery_id", deliveryID,
+				"repo", payload.Repository.FullName,
+				"pr", payload.Number,
+			)
+			githubWebhookRequestsTotal.WithLabelValues("pull_request", "labeled", "deep-review").Inc()
+			httputil.RespondJSON(w, http.StatusOK, map[string]string{
+				"status":      "accepted",
+				"delivery_id": deliveryID,
+				"type":        "deep-review",
+			})
+			go h.dispatchDeepReview(deliveryID, payload.Repository.FullName, payload.Number, payload.Sender.Login)
+			return
+		}
+		githubWebhookRequestsTotal.WithLabelValues("pull_request", "labeled", "ignored").Inc()
+		httputil.RespondJSON(w, http.StatusOK, map[string]string{"status": "ignored", "action": "labeled"})
+		return
+	}
+
 	switch action {
 	case domain.PROpened, domain.PRSynchronize, domain.PRReviewRequested:
-		// Process these actions
+		// Process these actions — dispatch lightweight review
 	default:
 		githubWebhookRequestsTotal.WithLabelValues("pull_request", payload.Action, "ignored").Inc()
 		httputil.RespondJSON(w, http.StatusOK, map[string]string{"status": "ignored", "action": payload.Action})
@@ -226,6 +258,26 @@ func (h *GitHubWebhookHandler) handleIssueComment(w http.ResponseWriter, body []
 	if payload.Action != "created" || payload.Issue.PullRequest == nil {
 		githubWebhookRequestsTotal.WithLabelValues("issue_comment", payload.Action, "ignored").Inc()
 		httputil.RespondJSON(w, http.StatusOK, map[string]string{"status": "ignored"})
+		return
+	}
+
+	// Check for /deep-review command on PRs
+	if strings.TrimSpace(payload.Comment.Body) == "/deep-review" && payload.Issue.PullRequest != nil {
+		slog.Info("github /deep-review command received",
+			"delivery_id", deliveryID,
+			"repo", payload.Repository.FullName,
+			"pr", payload.Issue.Number,
+			"sender", payload.Sender.Login,
+		)
+
+		githubWebhookRequestsTotal.WithLabelValues("issue_comment", "created", "deep-review").Inc()
+		httputil.RespondJSON(w, http.StatusOK, map[string]string{
+			"status":      "accepted",
+			"delivery_id": deliveryID,
+			"type":        "deep-review",
+		})
+
+		go h.dispatchDeepReview(deliveryID, payload.Repository.FullName, payload.Issue.Number, payload.Sender.Login)
 		return
 	}
 
@@ -400,6 +452,9 @@ func (h *GitHubWebhookHandler) dispatchPRPipeline(event domain.GitHubPREvent) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
+	// Fetch diff content and changed files from GitHub API
+	h.enrichPREvent(ctx, &event)
+
 	eventJSON, err := json.Marshal(event)
 	if err != nil {
 		slog.Error("failed to marshal PR event", "error", err, "delivery_id", event.DeliveryID)
@@ -436,7 +491,311 @@ func (h *GitHubWebhookHandler) dispatchPRPipeline(event domain.GitHubPREvent) {
 		"delivery_id", event.DeliveryID,
 		"repo", event.Repo,
 		"pr", event.PRNumber,
+		"diff_size", len(event.Diff),
+		"changed_files", len(event.ChangedFiles),
 	)
+}
+
+// handlePullRequestReview handles pull_request_review events.
+// When a reviewer approves, trigger the deep review merge gate pipeline.
+func (h *GitHubWebhookHandler) handlePullRequestReview(w http.ResponseWriter, body []byte, deliveryID string) {
+	var payload struct {
+		Action string `json:"action"`
+		Review struct {
+			State string `json:"state"`
+		} `json:"review"`
+		PullRequest struct {
+			Number  int    `json:"number"`
+			HTMLURL string `json:"html_url"`
+			DiffURL string `json:"diff_url"`
+			Head    struct {
+				Ref string `json:"ref"`
+				SHA string `json:"sha"`
+			} `json:"head"`
+			Base struct {
+				Ref string `json:"ref"`
+			} `json:"base"`
+		} `json:"pull_request"`
+		Repository struct {
+			FullName string `json:"full_name"`
+		} `json:"repository"`
+		Sender struct {
+			Login string `json:"login"`
+		} `json:"sender"`
+	}
+
+	if err := json.Unmarshal(body, &payload); err != nil {
+		githubWebhookRequestsTotal.WithLabelValues("pull_request_review", "", "error").Inc()
+		httputil.RespondError(w, http.StatusBadRequest, "invalid pull_request_review payload")
+		return
+	}
+
+	// Only trigger deep review on approval
+	if payload.Action != "submitted" || payload.Review.State != "approved" {
+		githubWebhookRequestsTotal.WithLabelValues("pull_request_review", payload.Action, "ignored").Inc()
+		httputil.RespondJSON(w, http.StatusOK, map[string]string{"status": "ignored", "action": payload.Action, "state": payload.Review.State})
+		return
+	}
+
+	slog.Info("github pr review approved — triggering deep review",
+		"delivery_id", deliveryID,
+		"repo", payload.Repository.FullName,
+		"pr", payload.PullRequest.Number,
+		"reviewer", payload.Sender.Login,
+	)
+
+	githubWebhookRequestsTotal.WithLabelValues("pull_request_review", "approved", "accepted").Inc()
+	httputil.RespondJSON(w, http.StatusOK, map[string]string{
+		"status":      "accepted",
+		"delivery_id": deliveryID,
+		"type":        "deep-review",
+	})
+
+	go h.dispatchDeepReview(deliveryID, payload.Repository.FullName, payload.PullRequest.Number, payload.Sender.Login)
+}
+
+// dispatchDeepReview fetches PR data and dispatches the merge gate pipeline.
+func (h *GitHubWebhookHandler) dispatchDeepReview(deliveryID, repo string, prNumber int, sender string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	// Fetch PR details from GitHub API to build the event
+	prData, err := h.fetchPRDetails(ctx, repo, prNumber)
+	if err != nil {
+		slog.Error("failed to fetch PR details for deep review",
+			"error", err,
+			"delivery_id", deliveryID,
+			"repo", repo,
+			"pr", prNumber,
+		)
+		return
+	}
+
+	event := domain.GitHubPREvent{
+		DeliveryID: deliveryID,
+		Action:     "deep_review",
+		PRNumber:   prNumber,
+		PRURL:      prData.HTMLURL,
+		PRTitle:    prData.Title,
+		PRBody:     prData.Body,
+		DiffURL:    prData.DiffURL,
+		HeadBranch: prData.HeadRef,
+		BaseBranch: prData.BaseRef,
+		HeadSHA:    prData.HeadSHA,
+		Repo:       repo,
+		Sender:     sender,
+	}
+
+	// Enrich with diff and changed files
+	h.enrichPREvent(ctx, &event)
+
+	eventJSON, err := json.Marshal(event)
+	if err != nil {
+		slog.Error("failed to marshal deep review event", "error", err, "delivery_id", deliveryID)
+		return
+	}
+
+	payload, err := json.Marshal(map[string]json.RawMessage{"input_data": eventJSON})
+	if err != nil {
+		slog.Error("failed to wrap deep review event", "error", err, "delivery_id", deliveryID)
+		return
+	}
+
+	_, err = h.executor.PostRaw(ctx, "/api/v1/pipelines/github-pr-merge-gate/execute", payload)
+	if err != nil {
+		slog.Error("deep review pipeline dispatch failed",
+			"error", err,
+			"delivery_id", deliveryID,
+			"repo", repo,
+			"pr", prNumber,
+		)
+		return
+	}
+
+	slog.Info("deep review pipeline dispatch completed",
+		"delivery_id", deliveryID,
+		"repo", repo,
+		"pr", prNumber,
+		"diff_size", len(event.Diff),
+	)
+}
+
+// enrichPREvent fetches the diff content and changed files from GitHub and populates the event.
+func (h *GitHubWebhookHandler) enrichPREvent(ctx context.Context, event *domain.GitHubPREvent) {
+	token := h.cfg.Token
+
+	if event.DiffURL != "" {
+		diff, err := fetchDiff(ctx, event.DiffURL, token)
+		if err != nil {
+			slog.Warn("failed to fetch PR diff, proceeding without it",
+				"error", err,
+				"repo", event.Repo,
+				"pr", event.PRNumber,
+			)
+		} else {
+			event.Diff = diff
+			slog.Info("fetched PR diff",
+				"repo", event.Repo,
+				"pr", event.PRNumber,
+				"diff_bytes", len(diff),
+			)
+		}
+	}
+
+	if event.Repo != "" && event.PRNumber > 0 {
+		files, err := fetchChangedFiles(ctx, event.Repo, event.PRNumber, token)
+		if err != nil {
+			slog.Warn("failed to fetch changed files, proceeding without them",
+				"error", err,
+				"repo", event.Repo,
+				"pr", event.PRNumber,
+			)
+		} else {
+			event.ChangedFiles = files
+			slog.Info("fetched changed files",
+				"repo", event.Repo,
+				"pr", event.PRNumber,
+				"file_count", len(files),
+			)
+		}
+	}
+}
+
+// prDetails holds the minimal PR info needed to construct a GitHubPREvent from the API.
+type prDetails struct {
+	HTMLURL string
+	Title   string
+	Body    string
+	DiffURL string
+	HeadRef string
+	BaseRef string
+	HeadSHA string
+}
+
+// fetchPRDetails fetches PR metadata from the GitHub API.
+func (h *GitHubWebhookHandler) fetchPRDetails(ctx context.Context, repo string, prNumber int) (*prDetails, error) {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/pulls/%d", repo, prNumber)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating PR details request: %w", err)
+	}
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	if h.cfg.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+h.cfg.Token)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetching PR details: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("PR details returned %d", resp.StatusCode)
+	}
+
+	var pr struct {
+		HTMLURL string `json:"html_url"`
+		Title   string `json:"title"`
+		Body    string `json:"body"`
+		DiffURL string `json:"diff_url"`
+		Head    struct {
+			Ref string `json:"ref"`
+			SHA string `json:"sha"`
+		} `json:"head"`
+		Base struct {
+			Ref string `json:"ref"`
+		} `json:"base"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&pr); err != nil {
+		return nil, fmt.Errorf("decoding PR details: %w", err)
+	}
+
+	return &prDetails{
+		HTMLURL: pr.HTMLURL,
+		Title:   pr.Title,
+		Body:    pr.Body,
+		DiffURL: pr.DiffURL,
+		HeadRef: pr.Head.Ref,
+		BaseRef: pr.Base.Ref,
+		HeadSHA: pr.Head.SHA,
+	}, nil
+}
+
+// fetchDiff fetches the raw unified diff from the GitHub diff URL.
+func fetchDiff(ctx context.Context, diffURL, token string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, diffURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("creating diff request: %w", err)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("fetching diff: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("diff fetch returned %d", resp.StatusCode)
+	}
+
+	// Cap at 1MB to avoid blowing up the payload
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", fmt.Errorf("reading diff body: %w", err)
+	}
+
+	return string(body), nil
+}
+
+// fetchChangedFiles fetches the structured list of changed files from the GitHub API.
+func fetchChangedFiles(ctx context.Context, repo string, prNumber int, token string) ([]domain.PRFile, error) {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/pulls/%d/files?per_page=100", repo, prNumber)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating changed-files request: %w", err)
+	}
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetching changed files: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("changed-files fetch returned %d", resp.StatusCode)
+	}
+
+	var ghFiles []struct {
+		Filename  string `json:"filename"`
+		Status    string `json:"status"`
+		Additions int    `json:"additions"`
+		Deletions int    `json:"deletions"`
+		Patch     string `json:"patch"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&ghFiles); err != nil {
+		return nil, fmt.Errorf("decoding changed files: %w", err)
+	}
+
+	files := make([]domain.PRFile, len(ghFiles))
+	for i, f := range ghFiles {
+		files[i] = domain.PRFile{
+			Filename:  f.Filename,
+			Status:    f.Status,
+			Additions: f.Additions,
+			Deletions: f.Deletions,
+			Patch:     f.Patch,
+		}
+	}
+	return files, nil
 }
 
 func (h *GitHubWebhookHandler) dispatchCorrection(execDomain, skill, execID string, feedback domain.CommentFeedback) {
