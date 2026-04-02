@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,7 +33,11 @@ func NewTokenProvider(appID, privateKeyPEM, installationID string) (*TokenProvid
 		return nil, nil
 	}
 
-	key, err := jwt.ParseRSAPrivateKeyFromPEM([]byte(privateKeyPEM))
+	// Normalize PEM: env var substitution or YAML parsing may replace real
+	// newlines with literal "\n" sequences. Restore them before parsing.
+	normalizedPEM := strings.ReplaceAll(privateKeyPEM, `\n`, "\n")
+
+	key, err := jwt.ParseRSAPrivateKeyFromPEM([]byte(normalizedPEM))
 	if err != nil {
 		return nil, fmt.Errorf("parsing GitHub App private key: %w", err)
 	}

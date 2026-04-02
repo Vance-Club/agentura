@@ -92,12 +92,16 @@ func main() {
 	}
 
 	// GitHub App token provider (generates fresh installation tokens per request)
+	// Read PEM directly from env — YAML config can't handle multi-line PEM values.
 	var githubTokenProvider handler.GitHubTokenProvider
 	ghCfg := cfg.Triggers.GitHub
-	tp, err := ghtoken.NewTokenProvider(ghCfg.AppID, ghCfg.PrivateKey, ghCfg.InstallationID)
+	privateKeyPEM := ghCfg.PrivateKey
+	if pk := os.Getenv("GITHUB_APP_PRIVATE_KEY"); pk != "" {
+		privateKeyPEM = pk
+	}
+	tp, err := ghtoken.NewTokenProvider(ghCfg.AppID, privateKeyPEM, ghCfg.InstallationID)
 	if err != nil {
-		slog.Error("failed to initialize GitHub token provider", "error", err)
-		os.Exit(1)
+		slog.Error("failed to initialize GitHub token provider, falling back to static token", "error", err)
 	}
 	if tp != nil {
 		githubTokenProvider = tp
