@@ -615,16 +615,31 @@ async def run_pipeline(name: str, pipeline_input: dict[str, Any]) -> dict[str, A
             phase_input.update(carry_forward)
 
             if phase.type == "parallel":
+                # Skip agents that triage marked as unnecessary (cost optimization)
+                skip_agents = set(carry_forward.get("skip_agents", []))
+                active_steps = [
+                    s for s in phase.steps
+                    if (s.agent_id or s.skill.split("/")[-1]) not in skip_agents
+                ]
+                if skip_agents and len(active_steps) < len(phase.steps):
+                    skipped = [s.agent_id or s.skill for s in phase.steps if s not in active_steps]
+                    logger.info("triage skip_agents: skipping %s (saving ~$%.2f)",
+                                skipped, len(skipped) * 0.7)
+                skipped_phase = PipelinePhase(
+                    name=phase.name, type=phase.type, steps=active_steps,
+                    fan_in_from=phase.fan_in_from, model_override=phase.model_override,
+                )
+
                 # Register agents in fleet store
                 if store and session_id:
-                    for step in phase.steps:
+                    for step in active_steps:
                         aid = step.agent_id or step.skill.replace("/", "-")
                         try:
                             store.create_agent(session_id, f"{session_id}-{aid}", step.skill)
                         except Exception:
                             pass
 
-                phase_results = await execute_parallel_phase(phase, phase_input, skills_dir)
+                phase_results = await execute_parallel_phase(skipped_phase, phase_input, skills_dir)
                 all_results.extend(phase_results)
 
                 # Update fleet store with per-agent results
@@ -685,6 +700,18 @@ async def run_pipeline(name: str, pipeline_input: dict[str, Any]) -> dict[str, A
 
                 # Propagate agent_results for downstream fan-in phases
                 carry_forward["agent_results"] = _compact_agent_results(seq_results)
+
+                # Extract triage directives (skip_agents, model_override) into carry_forward
+                for r in seq_results:
+                    output = r.get("output") or {}
+                    if isinstance(output, str):
+                        try:
+                            output = json.loads(output)
+                        except (json.JSONDecodeError, TypeError):
+                            output = {}
+                    if "skip_agents" in output:
+                        carry_forward["skip_agents"] = output["skip_agents"]
+                        logger.info("triage directive: skip_agents=%s", output["skip_agents"])
 
             # Check for required-step failures — abort remaining phases
             has_required_failure = any(
