@@ -410,8 +410,10 @@ async def _prefetch_pr_data(input_data: dict[str, Any]) -> dict[str, Any]:
     enriched = dict(input_data)
     try:
         from agentura_sdk.pipelines.github_client import fetch_pr_diff, fetch_pr_files
-        diff = await fetch_pr_diff(repo=repo, pr_number=int(pr_number))
-        files = await fetch_pr_files(repo=repo, pr_number=int(pr_number))
+        # Prefer fresh token from gateway input over stale env var
+        token = input_data.get("github_token") or None
+        diff = await fetch_pr_diff(repo=repo, pr_number=int(pr_number), token=token)
+        files = await fetch_pr_files(repo=repo, pr_number=int(pr_number), token=token)
         original_len = len(diff)
         diff, skipped = _truncate_diff(diff, files)
         enriched["diff"] = diff
@@ -506,7 +508,8 @@ async def _maybe_post_pr_review(
         return
 
     from agentura_sdk.pipelines import github_client
-    token = github_client.get_token()
+    # Prefer fresh token from gateway input over stale env var
+    token = input_data.get("github_token") or github_client.get_token()
     if not token:
         logger.warning("GITHUB_TOKEN not set — skipping PR review posting")
         return
