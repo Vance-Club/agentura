@@ -213,6 +213,12 @@ async def execute_stream(request: AgentRequest):
                     for block in message.content:
                         if isinstance(block, ToolUseBlock):
                             iteration_count += 1
+                            # Log every tool call for debugging
+                            input_preview = str(block.input)[:200] if block.input else ""
+                            logger.info(
+                                "iter=%d tool=%s input=%s",
+                                iteration_count, block.name, input_preview,
+                            )
                             yield _sse("iteration", {
                                 "iteration": iteration_count,
                                 "tool_name": block.name,
@@ -221,6 +227,7 @@ async def execute_stream(request: AgentRequest):
                             })
                         elif isinstance(block, TextBlock):
                             final_text_parts.append(block.text)
+                            logger.info("agent_text: %s", block.text[:300])
 
                 elif isinstance(message, UserMessage):
                     if isinstance(message.content, list):
@@ -253,6 +260,10 @@ async def execute_stream(request: AgentRequest):
 
             # Continuation loop: if TASK_RESULT.json not written, retry
             result_path = Path(WORK_DIR) / "TASK_RESULT.json"
+            logger.info(
+                "main execution done. iterations=%d, TASK_RESULT exists=%s, task_type=%s",
+                iteration_count, result_path.exists(), request.task_type,
+            )
             continuation = 0
             while not result_path.exists() and continuation < MAX_CONTINUATIONS:
                 continuation += 1
