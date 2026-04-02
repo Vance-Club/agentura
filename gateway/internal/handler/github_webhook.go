@@ -267,24 +267,49 @@ func (h *GitHubWebhookHandler) handleIssueComment(w http.ResponseWriter, body []
 		return
 	}
 
-	// Check for /deep-review command on PRs
-	if strings.TrimSpace(payload.Comment.Body) == "/deep-review" && payload.Issue.PullRequest != nil {
-		slog.Info("github /deep-review command received",
-			"delivery_id", deliveryID,
-			"repo", payload.Repository.FullName,
-			"pr", payload.Issue.Number,
-			"sender", payload.Sender.Login,
-		)
+	// Check for review commands on PRs
+	commentBody := strings.TrimSpace(payload.Comment.Body)
+	if payload.Issue.PullRequest != nil {
+		// Deep review: /deep-review or /shipwright deep-review
+		if commentBody == "/deep-review" || commentBody == "/shipwright deep-review" {
+			slog.Info("github deep-review command received",
+				"delivery_id", deliveryID,
+				"repo", payload.Repository.FullName,
+				"pr", payload.Issue.Number,
+				"sender", payload.Sender.Login,
+				"command", commentBody,
+			)
 
-		githubWebhookRequestsTotal.WithLabelValues("issue_comment", "created", "deep-review").Inc()
-		httputil.RespondJSON(w, http.StatusOK, map[string]string{
-			"status":      "accepted",
-			"delivery_id": deliveryID,
-			"type":        "deep-review",
-		})
+			githubWebhookRequestsTotal.WithLabelValues("issue_comment", "created", "deep-review").Inc()
+			httputil.RespondJSON(w, http.StatusOK, map[string]string{
+				"status":      "accepted",
+				"delivery_id": deliveryID,
+				"type":        "deep-review",
+			})
 
-		go h.dispatchDeepReview(deliveryID, payload.Repository.FullName, payload.Issue.Number, payload.Sender.Login)
-		return
+			go h.dispatchDeepReview(deliveryID, payload.Repository.FullName, payload.Issue.Number, payload.Sender.Login)
+			return
+		}
+
+		// Diff review: /shipwright review — triggers the parallel review pipeline
+		if commentBody == "/shipwright review" {
+			slog.Info("github shipwright review command received",
+				"delivery_id", deliveryID,
+				"repo", payload.Repository.FullName,
+				"pr", payload.Issue.Number,
+				"sender", payload.Sender.Login,
+			)
+
+			githubWebhookRequestsTotal.WithLabelValues("issue_comment", "created", "shipwright-review").Inc()
+			httputil.RespondJSON(w, http.StatusOK, map[string]string{
+				"status":      "accepted",
+				"delivery_id": deliveryID,
+				"type":        "review",
+			})
+
+			go h.dispatchReviewFromComment(deliveryID, payload.Repository.FullName, payload.Issue.Number, payload.Sender.Login)
+			return
+		}
 	}
 
 	// Check for @agentura mention before exec ID matching
@@ -459,12 +484,16 @@ func (h *GitHubWebhookHandler) dispatchPRPipeline(event domain.GitHubPREvent) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
+	// Create GitHub check run — developer sees "Shipwright is reviewing" immediately
+	checkRunID := h.createCheckRun(ctx, event.Repo, event.HeadSHA, "shipwright/review", "in_progress")
+
 	// Fetch diff content and changed files from GitHub API
 	h.enrichPREvent(ctx, &event)
 
 	inputData := h.buildInputData(ctx, event)
 	if inputData == nil {
 		slog.Error("failed to build input data", "delivery_id", event.DeliveryID)
+		h.completeCheckRun(ctx, event.Repo, checkRunID, "failure", "Shipwright Review — Error", "Failed to build input data for review.")
 		return
 	}
 
@@ -472,11 +501,13 @@ func (h *GitHubWebhookHandler) dispatchPRPipeline(event domain.GitHubPREvent) {
 	inputJSON, err := json.Marshal(inputData)
 	if err != nil {
 		slog.Error("failed to marshal input data", "error", err, "delivery_id", event.DeliveryID)
+		h.completeCheckRun(ctx, event.Repo, checkRunID, "failure", "Shipwright Review — Error", "Internal error marshaling input data.")
 		return
 	}
 	payload, err := json.Marshal(map[string]json.RawMessage{"input_data": inputJSON})
 	if err != nil {
 		slog.Error("failed to wrap PR event", "error", err, "delivery_id", event.DeliveryID)
+		h.completeCheckRun(ctx, event.Repo, checkRunID, "failure", "Shipwright Review — Error", "Internal error wrapping PR event.")
 		return
 	}
 
@@ -495,9 +526,12 @@ func (h *GitHubWebhookHandler) dispatchPRPipeline(event domain.GitHubPREvent) {
 				"repo", event.Repo,
 				"pr", event.PRNumber,
 			)
+			h.completeCheckRun(ctx, event.Repo, checkRunID, "failure", "Shipwright Review — Failed", "Pipeline execution failed. Check logs.")
 			return
 		}
 	}
+
+	h.completeCheckRun(ctx, event.Repo, checkRunID, "success", "Shipwright Review — Complete", "Review posted as a PR comment.")
 
 	slog.Info("PR pipeline dispatch completed",
 		"delivery_id", event.DeliveryID,
@@ -567,6 +601,36 @@ func (h *GitHubWebhookHandler) handlePullRequestReview(w http.ResponseWriter, bo
 }
 
 // dispatchDeepReview fetches PR data and dispatches the merge gate pipeline.
+// dispatchReviewFromComment triggers the parallel review pipeline from a /shipwright review comment.
+func (h *GitHubWebhookHandler) dispatchReviewFromComment(deliveryID, repo string, prNumber int, sender string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	prData, err := h.fetchPRDetails(ctx, repo, prNumber)
+	if err != nil {
+		slog.Error("failed to fetch PR details for review command",
+			"error", err, "delivery_id", deliveryID, "repo", repo, "pr", prNumber)
+		return
+	}
+
+	event := domain.GitHubPREvent{
+		DeliveryID: deliveryID,
+		Action:     "review_command",
+		PRNumber:   prNumber,
+		PRURL:      prData.HTMLURL,
+		PRTitle:    prData.Title,
+		PRBody:     prData.Body,
+		DiffURL:    prData.DiffURL,
+		HeadBranch: prData.HeadRef,
+		BaseBranch: prData.BaseRef,
+		HeadSHA:    prData.HeadSHA,
+		Repo:       repo,
+		Sender:     sender,
+	}
+
+	h.dispatchPRPipeline(event)
+}
+
 func (h *GitHubWebhookHandler) dispatchDeepReview(deliveryID, repo string, prNumber int, sender string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
@@ -582,6 +646,9 @@ func (h *GitHubWebhookHandler) dispatchDeepReview(deliveryID, repo string, prNum
 		)
 		return
 	}
+
+	// Create GitHub check run — developer sees "Deep review in progress" immediately
+	checkRunID := h.createCheckRun(ctx, repo, prData.HeadSHA, "shipwright/deep-review", "in_progress")
 
 	event := domain.GitHubPREvent{
 		DeliveryID: deliveryID,
@@ -604,18 +671,21 @@ func (h *GitHubWebhookHandler) dispatchDeepReview(deliveryID, repo string, prNum
 	inputData := h.buildInputData(ctx, event)
 	if inputData == nil {
 		slog.Error("failed to build deep review input data", "delivery_id", deliveryID)
+		h.completeCheckRun(ctx, repo, checkRunID, "failure", "Deep Review — Error", "Failed to build input data.")
 		return
 	}
 
 	inputJSON, err := json.Marshal(inputData)
 	if err != nil {
 		slog.Error("failed to marshal deep review input data", "error", err, "delivery_id", deliveryID)
+		h.completeCheckRun(ctx, repo, checkRunID, "failure", "Deep Review — Error", "Internal error.")
 		return
 	}
 
 	payload, err := json.Marshal(map[string]json.RawMessage{"input_data": inputJSON})
 	if err != nil {
 		slog.Error("failed to wrap deep review event", "error", err, "delivery_id", deliveryID)
+		h.completeCheckRun(ctx, repo, checkRunID, "failure", "Deep Review — Error", "Internal error.")
 		return
 	}
 
@@ -627,8 +697,11 @@ func (h *GitHubWebhookHandler) dispatchDeepReview(deliveryID, repo string, prNum
 			"repo", repo,
 			"pr", prNumber,
 		)
+		h.completeCheckRun(ctx, repo, checkRunID, "failure", "Deep Review — Failed", "Pipeline execution failed.")
 		return
 	}
+
+	h.completeCheckRun(ctx, repo, checkRunID, "success", "Deep Review — Complete", "Deep review posted as a PR comment.")
 
 	slog.Info("deep review pipeline dispatch completed",
 		"delivery_id", deliveryID,
