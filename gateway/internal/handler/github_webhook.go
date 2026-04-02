@@ -63,15 +63,21 @@ func isDuplicateDelivery(deliveryID string) bool {
 	return loaded
 }
 
+// GitHubTokenProvider generates fresh GitHub API tokens on demand.
+type GitHubTokenProvider interface {
+	Token(ctx context.Context) (string, error)
+}
+
 // GitHubWebhookHandler processes GitHub webhook events for PR pipelines.
 type GitHubWebhookHandler struct {
-	executor *executor.Client
-	cfg      config.GitHubWebhookConfig
+	executor      *executor.Client
+	cfg           config.GitHubWebhookConfig
+	tokenProvider GitHubTokenProvider
 }
 
 // NewGitHubWebhookHandler creates a handler for GitHub webhooks.
-func NewGitHubWebhookHandler(exec *executor.Client, cfg config.GitHubWebhookConfig) *GitHubWebhookHandler {
-	return &GitHubWebhookHandler{executor: exec, cfg: cfg}
+func NewGitHubWebhookHandler(exec *executor.Client, cfg config.GitHubWebhookConfig, tokenProvider GitHubTokenProvider) *GitHubWebhookHandler {
+	return &GitHubWebhookHandler{executor: exec, cfg: cfg, tokenProvider: tokenProvider}
 }
 
 // Handle processes POST /api/v1/webhooks/github.
@@ -419,11 +425,12 @@ func (h *GitHubWebhookHandler) dispatchIssueImplementation(event domain.GitHubIs
 	defer cancel()
 
 	input := map[string]interface{}{
-		"issue_number": event.IssueNumber,
-		"title":        event.Title,
-		"body":         event.Body,
-		"repo":         event.Repo,
-		"sender":       event.Sender,
+		"issue_number":  event.IssueNumber,
+		"title":         event.Title,
+		"body":          event.Body,
+		"repo":          event.Repo,
+		"sender":        event.Sender,
+		"github_token":  h.resolveToken(ctx),
 	}
 
 	execReq := executor.ExecuteRequest{
@@ -455,14 +462,19 @@ func (h *GitHubWebhookHandler) dispatchPRPipeline(event domain.GitHubPREvent) {
 	// Fetch diff content and changed files from GitHub API
 	h.enrichPREvent(ctx, &event)
 
-	eventJSON, err := json.Marshal(event)
-	if err != nil {
-		slog.Error("failed to marshal PR event", "error", err, "delivery_id", event.DeliveryID)
+	inputData := h.buildInputData(ctx, event)
+	if inputData == nil {
+		slog.Error("failed to build input data", "delivery_id", event.DeliveryID)
 		return
 	}
 
 	// Wrap in ExecuteRequest format (GR-009: input_data wrapper required)
-	payload, err := json.Marshal(map[string]json.RawMessage{"input_data": eventJSON})
+	inputJSON, err := json.Marshal(inputData)
+	if err != nil {
+		slog.Error("failed to marshal input data", "error", err, "delivery_id", event.DeliveryID)
+		return
+	}
+	payload, err := json.Marshal(map[string]json.RawMessage{"input_data": inputJSON})
 	if err != nil {
 		slog.Error("failed to wrap PR event", "error", err, "delivery_id", event.DeliveryID)
 		return
@@ -589,13 +601,19 @@ func (h *GitHubWebhookHandler) dispatchDeepReview(deliveryID, repo string, prNum
 	// Enrich with diff and changed files
 	h.enrichPREvent(ctx, &event)
 
-	eventJSON, err := json.Marshal(event)
-	if err != nil {
-		slog.Error("failed to marshal deep review event", "error", err, "delivery_id", deliveryID)
+	inputData := h.buildInputData(ctx, event)
+	if inputData == nil {
+		slog.Error("failed to build deep review input data", "delivery_id", deliveryID)
 		return
 	}
 
-	payload, err := json.Marshal(map[string]json.RawMessage{"input_data": eventJSON})
+	inputJSON, err := json.Marshal(inputData)
+	if err != nil {
+		slog.Error("failed to marshal deep review input data", "error", err, "delivery_id", deliveryID)
+		return
+	}
+
+	payload, err := json.Marshal(map[string]json.RawMessage{"input_data": inputJSON})
 	if err != nil {
 		slog.Error("failed to wrap deep review event", "error", err, "delivery_id", deliveryID)
 		return
@@ -622,7 +640,7 @@ func (h *GitHubWebhookHandler) dispatchDeepReview(deliveryID, repo string, prNum
 
 // enrichPREvent fetches the diff content and changed files from GitHub and populates the event.
 func (h *GitHubWebhookHandler) enrichPREvent(ctx context.Context, event *domain.GitHubPREvent) {
-	token := h.cfg.Token
+	token := h.resolveToken(ctx)
 
 	if event.Repo != "" && event.PRNumber > 0 {
 		diff, err := fetchDiff(ctx, event.Repo, event.PRNumber, token)
@@ -680,8 +698,8 @@ func (h *GitHubWebhookHandler) fetchPRDetails(ctx context.Context, repo string, 
 		return nil, fmt.Errorf("creating PR details request: %w", err)
 	}
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
-	if h.cfg.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+h.cfg.Token)
+	if token := h.resolveToken(ctx); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
 	resp, err := http.DefaultClient.Do(req)
@@ -834,11 +852,12 @@ func (h *GitHubWebhookHandler) dispatchMention(mention domain.MentionEvent) {
 
 	// Execute dev/triage skill with mention context
 	input := map[string]interface{}{
-		"pr_number":  mention.PRNumber,
-		"repo":       mention.Repo,
-		"comment":    mention.Body,
-		"sender":     mention.Sender,
-		"comment_id": mention.CommentID,
+		"pr_number":    mention.PRNumber,
+		"repo":         mention.Repo,
+		"comment":      mention.Body,
+		"sender":       mention.Sender,
+		"comment_id":   mention.CommentID,
+		"github_token": h.resolveToken(ctx),
 	}
 
 	execReq := executor.ExecuteRequest{
@@ -915,6 +934,36 @@ func verifyGitHubSignature(body []byte, signature, secret string) bool {
 
 func isGitHubSecretPlaceholder(s string) bool {
 	return s == "${GITHUB_WEBHOOK_SECRET}"
+}
+
+// buildInputData marshals an event struct to a map and injects the github_token.
+func (h *GitHubWebhookHandler) buildInputData(ctx context.Context, event any) map[string]interface{} {
+	raw, err := json.Marshal(event)
+	if err != nil {
+		return nil
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil
+	}
+	if token := h.resolveToken(ctx); token != "" {
+		m["github_token"] = token
+	}
+	return m
+}
+
+// resolveToken returns a fresh GitHub API token, preferring the TokenProvider
+// over the static config token.
+func (h *GitHubWebhookHandler) resolveToken(ctx context.Context) string {
+	if h.tokenProvider != nil {
+		token, err := h.tokenProvider.Token(ctx)
+		if err != nil {
+			slog.Warn("failed to generate GitHub App token, falling back to static token", "error", err)
+		} else {
+			return token
+		}
+	}
+	return h.cfg.Token
 }
 
 // buildSignature creates a sha256= prefixed HMAC signature (for testing).

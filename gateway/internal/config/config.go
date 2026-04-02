@@ -144,9 +144,12 @@ type SlackEventConfig struct {
 }
 
 type GitHubWebhookConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	Secret  string `yaml:"secret"`
-	Token   string `yaml:"token"` // GitHub API token for fetching PR diffs and changed files
+	Enabled        bool   `yaml:"enabled"`
+	Secret         string `yaml:"secret"`
+	Token          string `yaml:"token"`           // Static token (deprecated, fallback for dev/local)
+	AppID          string `yaml:"app_id"`           // GitHub App ID
+	PrivateKey     string `yaml:"private_key"`      // PEM-encoded RSA private key
+	InstallationID string `yaml:"installation_id"`  // GitHub App installation ID
 }
 
 type CronConfig struct {
