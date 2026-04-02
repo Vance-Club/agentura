@@ -24,6 +24,45 @@ MAX_CONTINUATIONS = int(os.environ.get("MAX_CONTINUATIONS", "2"))
 
 app = FastAPI(title="Claude Code Worker", version="0.1.0")
 
+# Configure root logger so logger.info() actually outputs
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+
+def _setup_git_credentials(request: AgentRequest) -> None:
+    """Configure git to authenticate with GitHub using the available token.
+
+    Priority: GITHUB_TOKEN env var > github_token from input data > skip.
+    Sets up a global git credential helper so `git clone https://github.com/...`
+    works without the agent needing to manually configure auth.
+    """
+    import subprocess
+
+    # Try env var first (from K8s secret), then input data
+    token = os.environ.get("GITHUB_TOKEN", "")
+    if not token:
+        try:
+            input_data = json.loads(request.prompt)
+            token = input_data.get("github_token", "")
+        except (json.JSONDecodeError, AttributeError):
+            pass
+
+    if not token:
+        logger.info("No GitHub token available — git clone will require manual auth")
+        return
+
+    # Configure git to use token for all github.com HTTPS URLs
+    subprocess.run(
+        ["git", "config", "--global", "url.https://x-access-token:" + token + "@github.com/.insteadOf", "https://github.com/"],
+        capture_output=True,
+    )
+    # Also configure gh CLI
+    subprocess.run(
+        ["gh", "auth", "setup-git"],
+        capture_output=True,
+        env={**os.environ, "GITHUB_TOKEN": token, "GH_TOKEN": token},
+    )
+    logger.info("Git credentials configured for github.com")
+
 
 def _write_claude_md(request: AgentRequest) -> None:
     """Write CLAUDE.md to workspace — strongest behavioral signal for Claude Code.
@@ -181,6 +220,10 @@ async def execute_stream(request: AgentRequest):
                 env={**os.environ, "GIT_AUTHOR_NAME": "agentura", "GIT_AUTHOR_EMAIL": "bot@agentura",
                      "GIT_COMMITTER_NAME": "agentura", "GIT_COMMITTER_EMAIL": "bot@agentura"},
             )
+
+        # Configure git credentials so the agent can clone repos.
+        # Uses GITHUB_TOKEN from env (set via K8s secret) or github_token from input.
+        _setup_git_credentials(request)
 
         # Write CLAUDE.md — strongest signal to Claude Code about behavior.
         # This overrides CC's default "software engineering assistant" persona.
