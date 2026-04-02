@@ -70,6 +70,9 @@ triggers:
     enabled: true
     secret: "${GITHUB_WEBHOOK_SECRET}"
     token: "${GITHUB_TOKEN}"
+    app_id: "${GITHUB_APP_ID}"
+    private_key: "${GITHUB_APP_PRIVATE_KEY}"
+    installation_id: "${GITHUB_INSTALLATION_ID}"
   slack:
     enabled: true
     apps:
