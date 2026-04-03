@@ -525,12 +525,11 @@ async def _maybe_post_pr_review(
             inline_comments = _format_review_comments(review_output)
             summary = review_output.get("summary", "Automated review by Agentura")
 
-            verdict = review_output.get("verdict", "")
-            has_blocking = verdict == "request-changes" or any(
-                f.get("severity", "").upper() == "BLOCKER"
-                for f in review_output.get("findings", [])
-            )
-            event = "REQUEST_CHANGES" if has_blocking else "COMMENT"
+            # Always use COMMENT — never REQUEST_CHANGES during beta rollout.
+            # REQUEST_CHANGES blocks merge, which is too aggressive before
+            # severity calibration is complete. Graduate to REQUEST_CHANGES
+            # after false positive rate < 10% across 50+ reviews.
+            event = "COMMENT"
 
             await github_client.post_review(
                 repo=repo,
