@@ -493,7 +493,7 @@ func (h *GitHubWebhookHandler) dispatchPRPipeline(event domain.GitHubPREvent) {
 	inputData := h.buildInputData(ctx, event)
 	if inputData == nil {
 		slog.Error("failed to build input data", "delivery_id", event.DeliveryID)
-		h.completeCheckRun(ctx, event.Repo, checkRunID, "failure", "Shipwright Review — Error", "Failed to build input data for review.")
+		h.completeCheckRun(ctx, event.Repo, checkRunID, "neutral", "Shipwright Review — Error", "Failed to build input data. This does not block merge.")
 		return
 	}
 
@@ -501,13 +501,13 @@ func (h *GitHubWebhookHandler) dispatchPRPipeline(event domain.GitHubPREvent) {
 	inputJSON, err := json.Marshal(inputData)
 	if err != nil {
 		slog.Error("failed to marshal input data", "error", err, "delivery_id", event.DeliveryID)
-		h.completeCheckRun(ctx, event.Repo, checkRunID, "failure", "Shipwright Review — Error", "Internal error marshaling input data.")
+		h.completeCheckRun(ctx, event.Repo, checkRunID, "neutral", "Shipwright Review — Error", "Internal error. This does not block merge.")
 		return
 	}
 	payload, err := json.Marshal(map[string]json.RawMessage{"input_data": inputJSON})
 	if err != nil {
 		slog.Error("failed to wrap PR event", "error", err, "delivery_id", event.DeliveryID)
-		h.completeCheckRun(ctx, event.Repo, checkRunID, "failure", "Shipwright Review — Error", "Internal error wrapping PR event.")
+		h.completeCheckRun(ctx, event.Repo, checkRunID, "neutral", "Shipwright Review — Error", "Internal error. This does not block merge.")
 		return
 	}
 
@@ -526,7 +526,7 @@ func (h *GitHubWebhookHandler) dispatchPRPipeline(event domain.GitHubPREvent) {
 				"repo", event.Repo,
 				"pr", event.PRNumber,
 			)
-			h.completeCheckRun(ctx, event.Repo, checkRunID, "failure", "Shipwright Review — Failed", "Pipeline execution failed. Check logs.")
+			h.completeCheckRun(ctx, event.Repo, checkRunID, "neutral", "Shipwright Review — Incomplete", "Pipeline execution failed. Re-trigger with /shipwright review. This does not block merge.")
 			return
 		}
 	}
@@ -671,21 +671,21 @@ func (h *GitHubWebhookHandler) dispatchDeepReview(deliveryID, repo string, prNum
 	inputData := h.buildInputData(ctx, event)
 	if inputData == nil {
 		slog.Error("failed to build deep review input data", "delivery_id", deliveryID)
-		h.completeCheckRun(ctx, repo, checkRunID, "failure", "Deep Review — Error", "Failed to build input data.")
+		h.completeCheckRun(ctx, repo, checkRunID, "neutral", "Deep Review — Error", "Failed to build input data. This does not block merge.")
 		return
 	}
 
 	inputJSON, err := json.Marshal(inputData)
 	if err != nil {
 		slog.Error("failed to marshal deep review input data", "error", err, "delivery_id", deliveryID)
-		h.completeCheckRun(ctx, repo, checkRunID, "failure", "Deep Review — Error", "Internal error.")
+		h.completeCheckRun(ctx, repo, checkRunID, "neutral", "Deep Review — Error", "Internal error. This does not block merge.")
 		return
 	}
 
 	payload, err := json.Marshal(map[string]json.RawMessage{"input_data": inputJSON})
 	if err != nil {
 		slog.Error("failed to wrap deep review event", "error", err, "delivery_id", deliveryID)
-		h.completeCheckRun(ctx, repo, checkRunID, "failure", "Deep Review — Error", "Internal error.")
+		h.completeCheckRun(ctx, repo, checkRunID, "neutral", "Deep Review — Error", "Internal error. This does not block merge.")
 		return
 	}
 
@@ -697,7 +697,7 @@ func (h *GitHubWebhookHandler) dispatchDeepReview(deliveryID, repo string, prNum
 			"repo", repo,
 			"pr", prNumber,
 		)
-		h.completeCheckRun(ctx, repo, checkRunID, "failure", "Deep Review — Failed", "Pipeline execution failed.")
+		h.completeCheckRun(ctx, repo, checkRunID, "neutral", "Deep Review — Incomplete", "Pipeline execution failed. Re-trigger with /shipwright deep-review. This does not block merge.")
 		return
 	}
 
