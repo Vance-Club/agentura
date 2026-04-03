@@ -628,7 +628,7 @@ async def run_pipeline(name: str, pipeline_input: dict[str, Any]) -> dict[str, A
                                 skipped, len(skipped) * 0.7)
                 skipped_phase = PipelinePhase(
                     name=phase.name, type=phase.type, steps=active_steps,
-                    fan_in_from=phase.fan_in_from, model_override=phase.model_override,
+                    fan_in_from=phase.fan_in_from,
                 )
 
                 # Register agents in fleet store
