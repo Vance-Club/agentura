@@ -615,8 +615,9 @@ async def run_pipeline(name: str, pipeline_input: dict[str, Any]) -> dict[str, A
             phase_input.update(carry_forward)
 
             if phase.type == "parallel":
-                # Skip agents that triage marked as unnecessary (cost optimization)
-                skip_agents = set(carry_forward.get("skip_agents", []))
+                # Skip agents from: .shipwright.yaml (in input_data) > triage output (in carry_forward)
+                skip_agents = set(normalized.get("skip_agents", []))
+                skip_agents.update(carry_forward.get("skip_agents", []))
                 active_steps = [
                     s for s in phase.steps
                     if (s.agent_id or s.skill.split("/")[-1]) not in skip_agents

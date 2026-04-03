@@ -1019,9 +1019,24 @@ func (h *GitHubWebhookHandler) buildInputData(ctx context.Context, event any) ma
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return nil
 	}
-	if token := h.resolveToken(ctx); token != "" {
+	token := h.resolveToken(ctx)
+	if token != "" {
 		m["github_token"] = token
 	}
+
+	// Fetch .shipwright.yaml from repo — drives agent skipping, severity, lint config
+	repo, _ := m["Repo"].(string)
+	if repo == "" {
+		repo, _ = m["repo"].(string)
+	}
+	if cfg := fetchShipwrightConfig(ctx, repo, token); cfg != nil {
+		m["shipwright_config"] = cfg
+		// Pre-compute skip_agents so triage and pipeline engine can use it directly
+		if skipList := skipAgentsFromConfig(cfg); len(skipList) > 0 {
+			m["skip_agents"] = skipList
+		}
+	}
+
 	return m
 }
 
