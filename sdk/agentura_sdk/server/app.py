@@ -3570,6 +3570,24 @@ def sync_agents_on_startup():
         logging.getLogger(__name__).warning("Agent sync failed (non-fatal): %s", e)
 
 
+@app.on_event("startup")
+def cleanup_stale_fleet_sessions():
+    """Timeout fleet sessions stuck in running/pending from crashed executors."""
+    dsn = os.environ.get("DATABASE_URL", "")
+    if not dsn:
+        return
+    try:
+        from agentura_sdk.memory.fleet_store import FleetStore
+        store = FleetStore(dsn)
+        count = store.timeout_stale_sessions(timeout_minutes=15)
+        if count:
+            import logging
+            logging.getLogger(__name__).info("Cleaned up %d stale fleet sessions on startup", count)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("Fleet session cleanup failed (non-fatal): %s", e)
+
+
 # ---------------------------------------------------------------------------
 # File watchers — hot-reload skills and agents on file changes
 # ---------------------------------------------------------------------------
