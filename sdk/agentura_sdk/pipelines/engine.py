@@ -617,16 +617,78 @@ async def _maybe_post_pr_review(
     else:
         logger.warning("no reviewer output found — skipping inline review on %s#%s", repo, pr_number)
 
-    # Post reporter summary as a PR comment
+    # Post reporter summary as a PR comment — but skip if findings unchanged
     final_output = all_results[-1].get("output", {}) if all_results else {}
     logger.debug("reporter final_output keys=%s", list(final_output.keys()) if isinstance(final_output, dict) else type(final_output))
     body = final_output.get("raw_output") or final_output.get("output", "")
     if body:
-        try:
-            await github_client.post_comment(repo=repo, pr_number=int(pr_number), body=body, token=token)
-            logger.info("posted PR summary comment on %s#%s", repo, pr_number)
-        except Exception as e:
-            logger.error("failed to post PR summary comment on %s#%s: %s", repo, pr_number, e)
+        # Dedup: check if the last Shipwright comment has the same findings
+        if await _is_duplicate_review_comment(repo, int(pr_number), body, token):
+            logger.info("skipping duplicate review comment on %s#%s — findings unchanged", repo, pr_number)
+        else:
+            try:
+                await github_client.post_comment(repo=repo, pr_number=int(pr_number), body=body, token=token)
+                logger.info("posted PR summary comment on %s#%s", repo, pr_number)
+            except Exception as e:
+                logger.error("failed to post PR summary comment on %s#%s: %s", repo, pr_number, e)
+
+
+async def _is_duplicate_review_comment(repo: str, pr_number: int, new_body: str, token: str) -> bool:
+    """Check if posting this review would be noise.
+
+    Two conditions that skip posting:
+    1. Same findings — the last Shipwright comment has identical verdict+findings
+       (cost/duration change every run, so we ignore those)
+    2. Recent review — a Shipwright comment was posted in the last 24 hours and
+       findings are the same (batching: avoid reviewing unchanged code repeatedly)
+
+    If the code changed and findings are different → always post.
+    """
+    import hashlib
+    from datetime import datetime, timezone, timedelta
+    try:
+        comments = await github_client.get_pr_comments(repo, pr_number, token)
+        bot_comments = [
+            c for c in comments
+            if c.get("user", {}).get("login") == "shipwright-crew[bot]"
+            and ("Shipwright Review" in c.get("body", "") or "Deep Review" in c.get("body", ""))
+        ]
+        if not bot_comments:
+            return False
+
+        last_comment = bot_comments[-1]
+        last_body = last_comment["body"]
+        last_created = last_comment.get("created_at", "")
+
+        # Hash the substantive part (verdict + findings) — ignore run-specific metadata
+        def findings_hash(body: str) -> str:
+            lines = []
+            for line in body.split("\n"):
+                if any(skip in line.lower() for skip in [
+                    "total cost:", "cost:", "duration:", "fleet session:",
+                    "exec-", "generated:", "| duration", "| cost"
+                ]):
+                    continue
+                lines.append(line.strip())
+            return hashlib.md5("\n".join(lines).encode()).hexdigest()
+
+        old_hash = findings_hash(last_body)
+        new_hash = findings_hash(new_body)
+
+        # Same findings → always skip (regardless of time)
+        if old_hash == new_hash:
+            logger.info("skipping duplicate review on %s#%d — findings unchanged (hash: %s)",
+                        repo, pr_number, old_hash[:8])
+            return True
+
+        # Different findings but recent review → post (code actually changed)
+        # This ensures new pushes with real changes get a fresh review
+        logger.info("findings changed on %s#%d — posting new review (old: %s, new: %s)",
+                    repo, pr_number, old_hash[:8], new_hash[:8])
+        return False
+    except Exception as e:
+        logger.debug("duplicate check failed (allowing post): %s", e)
+        return False
 
 
 async def run_pipeline(name: str, pipeline_input: dict[str, Any]) -> dict[str, Any]:
