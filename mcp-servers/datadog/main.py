@@ -329,54 +329,48 @@ async def _get_deployment_events(args: dict) -> str:
 
 
 async def _query_error_rate(args: dict) -> str:
-    """Query error rate and p99 latency from APM."""
+    """Query error rate, traffic, p95 latency, and apdex from APM."""
     service = args.get("service_name", "")
     period = args.get("period", "1h")
+    env = args.get("env", "prod")
 
     period_map = {"15m": 900, "1h": 3600, "4h": 14400, "1d": 86400, "7d": 604800}
     seconds = period_map.get(period, 3600)
     end = int(time.time())
     start = end - seconds
 
-    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-        # Error rate query
-        error_query = f"sum:trace.http.request.errors{{service:{service},env:production}}.as_rate()"
-        total_query = f"sum:trace.http.request.hits{{service:{service},env:production}}.as_rate()"
-        latency_query = f"p99:trace.http.request.duration{{service:{service},env:production}}"
-
+    async def _query_metric(client: httpx.AsyncClient, query: str) -> float:
         resp = await client.get(
             f"{DD_BASE}/api/v1/query",
             headers=_headers(),
-            params={"from": start, "to": end, "query": error_query},
+            params={"from": start, "to": end, "query": query},
         )
-        resp.raise_for_status()
-        error_data = resp.json()
+        if resp.status_code != 200:
+            return 0
+        series = resp.json().get("series", [])
+        if series and series[0].get("pointlist"):
+            return series[0]["pointlist"][-1][1]
+        return 0
 
-        resp2 = await client.get(
-            f"{DD_BASE}/api/v1/query",
-            headers=_headers(),
-            params={"from": start, "to": end, "query": latency_query},
-        )
-        latency_data = resp2.json() if resp2.status_code == 200 else {}
+    tags = f"env:{env},service:{service}"
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        hits = await _query_metric(client, f"sum:trace.http.request.hits{{{tags}}}.as_rate()")
+        errors_5xx = await _query_metric(client, f"sum:trace.http.request.hits.by_http_status{{{tags},http.status_class:5xx}}.as_rate()")
+        p95_s = await _query_metric(client, f"p95:trace.http.request{{{tags}}}")
+        apdex = await _query_metric(client, f"avg:trace.http.request.apdex{{{tags}}}")
 
-    # Extract latest values
-    error_series = error_data.get("series", [])
-    error_rate = 0
-    if error_series and error_series[0].get("pointlist"):
-        points = error_series[0]["pointlist"]
-        error_rate = points[-1][1] if points else 0
-
-    latency_series = latency_data.get("series", [])
-    p99_ms = 0
-    if latency_series and latency_series[0].get("pointlist"):
-        points = latency_series[0]["pointlist"]
-        p99_ms = round(points[-1][1] * 1000, 1) if points else 0
+    error_pct = (errors_5xx / hits * 100) if hits > 0 else 0
 
     result = {
         "service": service,
+        "env": env,
         "period": period,
-        "error_rate": round(error_rate, 4),
-        "p99_latency_ms": p99_ms,
+        "hits_per_sec": round(hits, 1),
+        "error_5xx_per_sec": round(errors_5xx, 3),
+        "error_rate_pct": round(error_pct, 2),
+        "p95_latency_ms": round(p95_s * 1000),
+        "apdex": round(apdex, 3),
+        "health": "healthy" if error_pct < 1 and apdex > 0.9 else "degraded" if error_pct < 5 else "critical",
         "query_time": datetime.now(timezone.utc).isoformat(),
     }
 
