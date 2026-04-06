@@ -533,6 +533,9 @@ func (h *GitHubWebhookHandler) dispatchPRPipeline(event domain.GitHubPREvent) {
 
 	h.completeCheckRun(ctx, event.Repo, checkRunID, "success", "Shipwright Review — Complete", "Review posted as a PR comment.")
 
+	// Add "shipwright-reviewed" label to trigger post-merge learning pipeline
+	h.addLabel(ctx, event.Repo, event.PRNumber, "shipwright-reviewed")
+
 	slog.Info("PR pipeline dispatch completed",
 		"delivery_id", event.DeliveryID,
 		"repo", event.Repo,

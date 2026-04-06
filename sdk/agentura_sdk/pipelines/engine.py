@@ -488,6 +488,76 @@ def _format_review_comments(review_output: dict[str, Any]) -> list[dict]:
     return comments
 
 
+def _record_reflexion_feedback(all_results: list[dict], input_data: dict) -> None:
+    """Feed verifier verdicts back into the reflexion store.
+
+    When the verifier marks a finding as false_positive, create a negative
+    reflexion so the reviewer is less confident on that pattern next time.
+    When findings are verified, boost the injected reflexions' utility scores.
+    """
+    try:
+        from agentura_sdk.memory import get_memory_store
+        store = get_memory_store()
+    except Exception:
+        return
+
+    repo = input_data.get("Repo") or input_data.get("repo", "")
+
+    # Find verifier output
+    verifier_output = None
+    reviewer_reflexion_ids = []
+    for r in all_results:
+        skill = r.get("skill", "")
+        if "verifier" in skill:
+            verifier_output = r.get("output", {})
+        if "reviewer" in skill and r.get("injected_reflexion_ids"):
+            reviewer_reflexion_ids = r.get("injected_reflexion_ids", [])
+
+    if not verifier_output:
+        return
+
+    # Parse verifier findings
+    findings = verifier_output.get("findings", [])
+    false_positives = [f for f in findings if f.get("status") == "false_positive"]
+    verified = [f for f in findings if f.get("status") == "verified"]
+
+    # Create negative reflexions for false positives
+    for fp in false_positives:
+        title = fp.get("title", "")
+        severity = fp.get("severity", "")
+        reason = fp.get("reason", "")
+        if title:
+            content = (
+                f"FALSE POSITIVE on {repo}: '{title}' ({severity}) was flagged "
+                f"but verifier determined: {reason}. Lower confidence on this pattern."
+            )
+            try:
+                store.create_reflexion(
+                    execution_id="",
+                    rule=content,
+                    skill_path="dev/pr-code-reviewer",
+                    scope=f"repo:{repo}",
+                )
+                logger.info("Created false-positive reflexion for repo=%s finding=%s", repo, title[:50])
+            except Exception as e:
+                logger.debug("Failed to create reflexion: %s", e)
+
+    # Boost utility scores for reflexions that led to verified findings
+    if verified and reviewer_reflexion_ids:
+        for rid in reviewer_reflexion_ids:
+            try:
+                store.record_execution_success(rid)
+                logger.info("Boosted reflexion %s (verified findings found)", rid)
+            except Exception as e:
+                logger.debug("Failed to boost reflexion: %s", e)
+
+    if false_positives or (verified and reviewer_reflexion_ids):
+        logger.info(
+            "Reflexion feedback: %d false positives logged, %d reflexions boosted for repo=%s",
+            len(false_positives), len(reviewer_reflexion_ids) if verified else 0, repo,
+        )
+
+
 async def _maybe_post_pr_review(
     pipeline_name: str,
     input_data: dict[str, Any],
@@ -749,6 +819,9 @@ async def run_pipeline(name: str, pipeline_input: dict[str, Any]) -> dict[str, A
 
     # Post inline review + summary comment for GitHub PR pipelines
     await _maybe_post_pr_review(name, normalized, all_results)
+
+    # Feed verifier verdicts back to reflexion store (closes the learning loop)
+    _record_reflexion_feedback(all_results, normalized)
 
     return {
         "pipeline": name,

@@ -137,6 +137,36 @@ func (h *GitHubWebhookHandler) completeCheckRun(ctx context.Context, repo string
 	slog.Info("check run completed", "repo", repo, "check_run_id", checkRunID, "conclusion", conclusion)
 }
 
+// addLabel adds a label to a PR via GitHub API. Non-fatal on failure.
+func (h *GitHubWebhookHandler) addLabel(ctx context.Context, repo string, prNumber int, label string) {
+	token := h.resolveToken(ctx)
+	if token == "" {
+		return
+	}
+
+	url := fmt.Sprintf("https://api.github.com/repos/%s/issues/%d/labels", repo, prNumber)
+	payload, _ := json.Marshal(map[string][]string{"labels": {label}})
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		slog.Debug("failed to add label", "error", err, "repo", repo, "pr", prNumber)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 300 {
+		slog.Info("added label to PR", "repo", repo, "pr", prNumber, "label", label)
+	}
+}
+
 func minInt(a, b int) int {
 	if a < b {
 		return a
