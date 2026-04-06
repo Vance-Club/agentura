@@ -313,6 +313,19 @@ func (h *GitHubWebhookHandler) handlePullRequest(w http.ResponseWriter, body []b
 		"sender", prEvent.Sender,
 	)
 
+	// Auto-review filter: repos with auto_review: false in .shipwright.yaml
+	// only get reviewed via /shipwright review comments, not on PR open/synchronize.
+	if h.isAutoReviewDisabled(prEvent.Repo) {
+		slog.Info("skipping auto-review — repo has auto_review: false",
+			"repo", prEvent.Repo, "pr", prEvent.PRNumber)
+		githubWebhookRequestsTotal.WithLabelValues("pull_request", payload.Action, "auto_disabled").Inc()
+		httputil.RespondJSON(w, http.StatusOK, map[string]string{
+			"status": "skipped",
+			"reason": "auto_review disabled — use /shipwright review to trigger manually",
+		})
+		return
+	}
+
 	// Base branch filter: only review PRs targeting configured branches.
 	// Uses .shipwright.yaml review_targets if available, otherwise repo default branch.
 	if !h.shouldReviewBranch(prEvent.Repo, prEvent.BaseBranch, payload.Repository.DefaultBranch) {

@@ -18,7 +18,8 @@ type ShipwrightConfig struct {
 	Version int `yaml:"version" json:"version"`
 
 	Review struct {
-		Agents map[string]bool `yaml:"agents" json:"agents"`
+		AutoReview *bool           `yaml:"auto_review" json:"auto_review"` // nil = true (default). false = manual only (/shipwright review)
+		Agents     map[string]bool `yaml:"agents" json:"agents"`
 
 		Severity struct {
 			Profile     string `yaml:"profile" json:"profile"`
@@ -154,6 +155,20 @@ func skipAgentsFromConfig(cfg *ShipwrightConfig) []string {
 		}
 	}
 	return skip
+}
+
+// isAutoReviewDisabled checks if the repo has auto_review: false in .shipwright.yaml.
+// Returns true if auto-review is disabled (manual trigger only).
+func (h *GitHubWebhookHandler) isAutoReviewDisabled(repo string) bool {
+	token := h.resolveToken(context.Background())
+	cfg := fetchShipwrightConfig(context.Background(), repo, token)
+	if cfg == nil {
+		return false // no config = auto-review enabled (default)
+	}
+	if cfg.Review.AutoReview == nil {
+		return false // nil = default = enabled
+	}
+	return !*cfg.Review.AutoReview
 }
 
 // shouldReviewBranch checks if a PR's base branch should be reviewed.
