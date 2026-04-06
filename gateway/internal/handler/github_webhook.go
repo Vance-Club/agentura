@@ -172,7 +172,8 @@ func (h *GitHubWebhookHandler) handlePullRequest(w http.ResponseWriter, body []b
 			} `json:"base"`
 		} `json:"pull_request"`
 		Repository struct {
-			FullName string `json:"full_name"`
+			FullName      string `json:"full_name"`
+			DefaultBranch string `json:"default_branch"`
 		} `json:"repository"`
 		Sender struct {
 			Login string `json:"login"`
@@ -244,8 +245,26 @@ func (h *GitHubWebhookHandler) handlePullRequest(w http.ResponseWriter, body []b
 		"repo", prEvent.Repo,
 		"pr", prEvent.PRNumber,
 		"action", string(prEvent.Action),
+		"base_branch", prEvent.BaseBranch,
 		"sender", prEvent.Sender,
 	)
+
+	// Base branch filter: only review PRs targeting configured branches.
+	// Uses .shipwright.yaml review_targets if available, otherwise repo default branch.
+	if !h.shouldReviewBranch(prEvent.Repo, prEvent.BaseBranch, payload.Repository.DefaultBranch) {
+		slog.Info("skipping PR — base branch not in review targets",
+			"repo", prEvent.Repo, "pr", prEvent.PRNumber,
+			"base_branch", prEvent.BaseBranch,
+			"default_branch", payload.Repository.DefaultBranch,
+		)
+		githubWebhookRequestsTotal.WithLabelValues("pull_request", payload.Action, "branch_filtered").Inc()
+		httputil.RespondJSON(w, http.StatusOK, map[string]string{
+			"status":      "skipped",
+			"reason":      "base branch not in review targets",
+			"base_branch": prEvent.BaseBranch,
+		})
+		return
+	}
 
 	// Dedup: skip if we've already dispatched a review for this repo+PR+SHA
 	if isDuplicatePRReview(prEvent.Repo, prEvent.PRNumber, prEvent.HeadSHA) {

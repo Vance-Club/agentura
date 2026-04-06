@@ -155,3 +155,37 @@ func skipAgentsFromConfig(cfg *ShipwrightConfig) []string {
 	}
 	return skip
 }
+
+// shouldReviewBranch checks if a PR's base branch should be reviewed.
+// Priority: .shipwright.yaml review_targets > repo default branch.
+// This prevents reviewing PRs to non-primary branches (e.g., stage→main
+// promotions in repos where stage is the default, or feature→feature PRs).
+func (h *GitHubWebhookHandler) shouldReviewBranch(repo, baseBranch, repoDefaultBranch string) bool {
+	// Fetch .shipwright.yaml to check configured review targets
+	token := h.resolveToken(context.Background())
+	if cfg := fetchShipwrightConfig(context.Background(), repo, token); cfg != nil {
+		targets := cfg.Branches.ReviewTargets
+		if len(targets) > 0 {
+			for _, t := range targets {
+				if t == baseBranch {
+					return true
+				}
+			}
+			slog.Debug("base branch not in .shipwright.yaml review_targets",
+				"repo", repo, "base", baseBranch, "targets", targets)
+			return false
+		}
+		// If review_targets is empty but default is set, use that
+		if cfg.Branches.Default != "" {
+			return baseBranch == cfg.Branches.Default
+		}
+	}
+
+	// Fallback: only review PRs targeting the repo's default branch
+	if repoDefaultBranch != "" {
+		return baseBranch == repoDefaultBranch
+	}
+
+	// If we can't determine, allow (don't block)
+	return true
+}
