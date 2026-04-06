@@ -713,28 +713,14 @@ func (h *GitHubWebhookHandler) handlePullRequestReview(w http.ResponseWriter, bo
 		return
 	}
 
-	// Only trigger deep review on approval
-	if payload.Action != "submitted" || payload.Review.State != "approved" {
-		githubWebhookRequestsTotal.WithLabelValues("pull_request_review", payload.Action, "ignored").Inc()
-		httputil.RespondJSON(w, http.StatusOK, map[string]string{"status": "ignored", "action": payload.Action, "state": payload.Review.State})
-		return
-	}
-
-	slog.Info("github pr review approved — triggering deep review",
-		"delivery_id", deliveryID,
-		"repo", payload.Repository.FullName,
-		"pr", payload.PullRequest.Number,
-		"reviewer", payload.Sender.Login,
-	)
-
-	githubWebhookRequestsTotal.WithLabelValues("pull_request_review", "approved", "accepted").Inc()
+	// Deep review is manual-only: /shipwright deep-review command.
+	// Auto-trigger on approval is disabled — too noisy during beta.
+	// To re-enable: check .shipwright.yaml deep_review.auto_trigger_on_approval
+	githubWebhookRequestsTotal.WithLabelValues("pull_request_review", payload.Action, "skipped").Inc()
 	httputil.RespondJSON(w, http.StatusOK, map[string]string{
-		"status":      "accepted",
-		"delivery_id": deliveryID,
-		"type":        "deep-review",
+		"status": "skipped",
+		"reason": "deep review is manual-only — use /shipwright deep-review",
 	})
-
-	go h.dispatchDeepReview(deliveryID, payload.Repository.FullName, payload.PullRequest.Number, payload.Sender.Login)
 }
 
 // dispatchDeepReview fetches PR data and dispatches the merge gate pipeline.
