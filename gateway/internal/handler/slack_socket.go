@@ -242,6 +242,13 @@ func (m *SlackSocketManager) handleSocketMessage(app *config.SlackAppConfig, cha
 			removeSlackReaction(app.BotToken, channel, ts, typingReaction)
 		}
 
+		// Suppress response if result is empty (e.g. triage-router returned null route)
+		if strings.TrimSpace(result) == "" {
+			slog.Info("empty result — suppressing Slack response",
+				"app", app.Name, "channel", channel)
+			return
+		}
+
 		// Post result — use Block Kit if skill returned rich_output
 		var postedTS string
 		if blocks, fallback, ok := tryParseRichOutput(result); ok {
@@ -256,10 +263,10 @@ func (m *SlackSocketManager) handleSocketMessage(app *config.SlackAppConfig, cha
 				threadParent = ts
 			}
 			postedTS, _ = postSlackBlocksWithTS(app.BotToken, channel, threadParent, fallback, blocks)
-		} else if replyTS != "" && replyTS != ts {
-			postedTS, _ = postSlackThreadReply(app.BotToken, channel, replyTS, result)
 		} else {
-			postedTS, _ = postSlackMessage(app.BotToken, channel, result)
+			// Always reply in a thread under the triggering message.
+			// This keeps the channel clean — bot output is in threads, not flat messages.
+			postedTS, _ = postSlackThreadReply(app.BotToken, channel, ts, result)
 		}
 
 		// Thread registration: remember skill for thread continuity
@@ -455,16 +462,15 @@ func (m *SlackSocketManager) dispatchAuto(ctx context.Context, app *config.Slack
 		routeTo = qualified
 	}
 
-	// If triage didn't produce a route, fall back to data-query (general-purpose).
-	// Never dump help text for natural language — always attempt an answer.
+	// If triage returned empty/null route, the message is not bot-directed — suppress response.
 	if routeTo == "" {
-		routeTo = app.DomainScope + "/data-query"
 		preview := cmd.Text
 		if len(preview) > 80 {
 			preview = preview[:80] + "..."
 		}
-		slog.Info("dispatchAuto: no triage route, falling back to data-query",
+		slog.Info("dispatchAuto: triage returned null route — suppressing response",
 			"domain", app.DomainScope, "text_preview", preview)
+		return "", cmd, nil
 	}
 
 	routeInput := map[string]any{"text": cmd.Text}
