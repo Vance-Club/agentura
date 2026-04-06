@@ -72,19 +72,27 @@ func isDuplicateDelivery(deliveryID string) bool {
 	return loaded
 }
 
-// isDuplicatePRReview checks if we've already dispatched a review for this
-// repo+PR+SHA combination. Prevents duplicate reviews when GitHub sends
-// multiple events for the same commit (opened + synchronize, rapid pushes).
+// isDuplicatePRReview checks if we've dispatched a review for this repo+PR
+// within a cooldown window. Keys on repo+PR (not SHA) because force-pushes
+// and base branch updates generate new SHAs for the same logical PR.
+// Cooldown: 5 minutes — after that, a new push to the same PR gets reviewed.
 func isDuplicatePRReview(repo string, prNumber int, headSHA string) bool {
-	if repo == "" || headSHA == "" {
+	if repo == "" {
 		return false
 	}
-	key := fmt.Sprintf("%s#%d@%s", repo, prNumber, headSHA)
-	_, loaded := recentPRReviews.LoadOrStore(key, time.Now())
-	if loaded {
-		slog.Info("skipping duplicate PR review", "repo", repo, "pr", prNumber, "sha", headSHA[:7])
+	key := fmt.Sprintf("%s#%d", repo, prNumber)
+	now := time.Now()
+
+	if prev, loaded := recentPRReviews.Load(key); loaded {
+		if ts, ok := prev.(time.Time); ok && now.Sub(ts) < 5*time.Minute {
+			slog.Info("skipping duplicate PR review (cooldown)",
+				"repo", repo, "pr", prNumber, "sha", headSHA[:7],
+				"last_review_ago", now.Sub(ts).Round(time.Second))
+			return true
+		}
 	}
-	return loaded
+	recentPRReviews.Store(key, now)
+	return false
 }
 
 // GitHubTokenProvider generates fresh GitHub API tokens on demand.
