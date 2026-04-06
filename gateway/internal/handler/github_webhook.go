@@ -281,8 +281,11 @@ func (h *GitHubWebhookHandler) handlePullRequest(w http.ResponseWriter, body []b
 	}
 
 	switch action {
-	case domain.PROpened, domain.PRSynchronize, domain.PRReviewRequested:
-		// Process these actions — dispatch lightweight review
+	case domain.PROpened:
+		// Always review on PR open — first look at the code
+	case domain.PRSynchronize:
+		// Review on push — but dedup check in executor will skip posting
+		// if findings are unchanged from last review
 	default:
 		githubWebhookRequestsTotal.WithLabelValues("pull_request", payload.Action, "ignored").Inc()
 		httputil.RespondJSON(w, http.StatusOK, map[string]string{"status": "ignored", "action": payload.Action})
