@@ -72,10 +72,14 @@ func isDuplicateDelivery(deliveryID string) bool {
 	return loaded
 }
 
+// prReviewCooldown controls how often the same PR can be auto-reviewed.
+// 8 hours: review once on open, skip subsequent pushes for a full work session.
+// Manual /shipwright review bypasses this (goes through issue_comment handler, not here).
+const prReviewCooldown = 8 * time.Hour
+
 // isDuplicatePRReview checks if we've dispatched a review for this repo+PR
-// within a cooldown window. Uses both in-memory cache AND persistent DB check
+// within the cooldown window. Uses both in-memory cache AND persistent DB check
 // so the dedup survives gateway restarts.
-// Cooldown: 5 minutes — after that, a new push to the same PR gets reviewed.
 func isDuplicatePRReview(repo string, prNumber int, headSHA string) bool {
 	if repo == "" {
 		return false
@@ -85,7 +89,7 @@ func isDuplicatePRReview(repo string, prNumber int, headSHA string) bool {
 
 	// In-memory fast path
 	if prev, loaded := recentPRReviews.Load(key); loaded {
-		if ts, ok := prev.(time.Time); ok && now.Sub(ts) < 5*time.Minute {
+		if ts, ok := prev.(time.Time); ok && now.Sub(ts) < prReviewCooldown {
 			slog.Info("skipping duplicate PR review (in-memory cooldown)",
 				"repo", repo, "pr", prNumber, "sha", headSHA[:7],
 				"last_review_ago", now.Sub(ts).Round(time.Second))
@@ -148,7 +152,7 @@ func isDuplicateInFleetStore(repo string, prNumber int) bool {
 			return false
 		}
 	}
-	return time.Since(created) < 5*time.Minute
+	return time.Since(created) < prReviewCooldown
 }
 
 // GitHubTokenProvider generates fresh GitHub API tokens on demand.
