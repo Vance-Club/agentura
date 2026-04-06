@@ -73,8 +73,8 @@ func isDuplicateDelivery(deliveryID string) bool {
 }
 
 // isDuplicatePRReview checks if we've dispatched a review for this repo+PR
-// within a cooldown window. Keys on repo+PR (not SHA) because force-pushes
-// and base branch updates generate new SHAs for the same logical PR.
+// within a cooldown window. Uses both in-memory cache AND persistent DB check
+// so the dedup survives gateway restarts.
 // Cooldown: 5 minutes — after that, a new push to the same PR gets reviewed.
 func isDuplicatePRReview(repo string, prNumber int, headSHA string) bool {
 	if repo == "" {
@@ -83,16 +83,72 @@ func isDuplicatePRReview(repo string, prNumber int, headSHA string) bool {
 	key := fmt.Sprintf("%s#%d", repo, prNumber)
 	now := time.Now()
 
+	// In-memory fast path
 	if prev, loaded := recentPRReviews.Load(key); loaded {
 		if ts, ok := prev.(time.Time); ok && now.Sub(ts) < 5*time.Minute {
-			slog.Info("skipping duplicate PR review (cooldown)",
+			slog.Info("skipping duplicate PR review (in-memory cooldown)",
 				"repo", repo, "pr", prNumber, "sha", headSHA[:7],
 				"last_review_ago", now.Sub(ts).Round(time.Second))
 			return true
 		}
 	}
+
+	// Persistent check: query executor for recent fleet sessions for this PR.
+	// This survives gateway restarts — the in-memory check is just a fast path.
+	if isDuplicateInFleetStore(repo, prNumber) {
+		slog.Info("skipping duplicate PR review (fleet store cooldown)",
+			"repo", repo, "pr", prNumber, "sha", headSHA[:7])
+		recentPRReviews.Store(key, now) // warm the in-memory cache
+		return true
+	}
+
 	recentPRReviews.Store(key, now)
 	return false
+}
+
+// isDuplicateInFleetStore checks the executor's fleet store for a recent
+// session for this repo+PR. Returns true if a session was created in the
+// last 5 minutes (meaning a review is already in progress or just completed).
+func isDuplicateInFleetStore(repo string, prNumber int) bool {
+	// Query the executor's fleet sessions API
+	url := fmt.Sprintf("http://executor:8000/api/v1/fleet/sessions?repo=%s&pr=%d&limit=1",
+		repo, prNumber)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false // executor unreachable — allow the review
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+
+	var sessions []struct {
+		CreatedAt string `json:"created_at"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&sessions); err != nil {
+		return false
+	}
+	if len(sessions) == 0 {
+		return false
+	}
+
+	// Check if the most recent session was created within cooldown
+	created, err := time.Parse(time.RFC3339Nano, sessions[0].CreatedAt)
+	if err != nil {
+		// Try alternate format
+		created, err = time.Parse("2006-01-02T15:04:05.999999-07:00", sessions[0].CreatedAt)
+		if err != nil {
+			return false
+		}
+	}
+	return time.Since(created) < 5*time.Minute
 }
 
 // GitHubTokenProvider generates fresh GitHub API tokens on demand.
