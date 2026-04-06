@@ -37,6 +37,9 @@ var (
 
 	// recentDeliveries deduplicates GitHub webhook retries by X-GitHub-Delivery header.
 	recentDeliveries sync.Map
+	// recentPRReviews deduplicates PR reviews by repo+PR+headSHA to avoid posting
+	// duplicate reviews when GitHub sends multiple events for the same commit.
+	recentPRReviews sync.Map
 )
 
 func init() {
@@ -51,6 +54,12 @@ func init() {
 				}
 				return true
 			})
+			recentPRReviews.Range(func(key, value any) bool {
+				if ts, ok := value.(time.Time); ok && now.Sub(ts) > deliveryTTL {
+					recentPRReviews.Delete(key)
+				}
+				return true
+			})
 		}
 	}()
 }
@@ -60,6 +69,21 @@ func isDuplicateDelivery(deliveryID string) bool {
 		return false
 	}
 	_, loaded := recentDeliveries.LoadOrStore(deliveryID, time.Now())
+	return loaded
+}
+
+// isDuplicatePRReview checks if we've already dispatched a review for this
+// repo+PR+SHA combination. Prevents duplicate reviews when GitHub sends
+// multiple events for the same commit (opened + synchronize, rapid pushes).
+func isDuplicatePRReview(repo string, prNumber int, headSHA string) bool {
+	if repo == "" || headSHA == "" {
+		return false
+	}
+	key := fmt.Sprintf("%s#%d@%s", repo, prNumber, headSHA)
+	_, loaded := recentPRReviews.LoadOrStore(key, time.Now())
+	if loaded {
+		slog.Info("skipping duplicate PR review", "repo", repo, "pr", prNumber, "sha", headSHA[:7])
+	}
 	return loaded
 }
 
@@ -222,6 +246,13 @@ func (h *GitHubWebhookHandler) handlePullRequest(w http.ResponseWriter, body []b
 		"action", string(prEvent.Action),
 		"sender", prEvent.Sender,
 	)
+
+	// Dedup: skip if we've already dispatched a review for this repo+PR+SHA
+	if isDuplicatePRReview(prEvent.Repo, prEvent.PRNumber, prEvent.HeadSHA) {
+		githubWebhookRequestsTotal.WithLabelValues("pull_request", payload.Action, "duplicate").Inc()
+		httputil.RespondJSON(w, http.StatusOK, map[string]string{"status": "duplicate", "delivery_id": deliveryID})
+		return
+	}
 
 	// Respond 200 immediately, dispatch pipeline async (GitHub requires < 10s response)
 	githubWebhookRequestsTotal.WithLabelValues("pull_request", payload.Action, "accepted").Inc()
