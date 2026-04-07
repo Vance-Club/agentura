@@ -55,7 +55,7 @@ func init() {
 				return true
 			})
 			recentPRReviews.Range(func(key, value any) bool {
-				if ts, ok := value.(time.Time); ok && now.Sub(ts) > deliveryTTL {
+				if ts, ok := value.(time.Time); ok && now.Sub(ts) > prReviewCooldown {
 					recentPRReviews.Delete(key)
 				}
 				return true
