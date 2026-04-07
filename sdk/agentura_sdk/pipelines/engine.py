@@ -175,7 +175,14 @@ def _build_skill_context(
             if sandbox_raw and sandbox_config is not None:
                 sandbox_config = SandboxConfig(**sandbox_raw)
             gateway_api_key = os.environ.get("MCP_GATEWAY_API_KEY", "")
-            for mcp_ref in cfg.get("mcp_tools", []):
+            # mcp_tools can be at top level OR inside skills[].mcp_tools
+            mcp_tools = cfg.get("mcp_tools", [])
+            if not mcp_tools:
+                for skill_cfg in cfg.get("skills", []):
+                    if skill_cfg.get("name") == loaded.metadata.name:
+                        mcp_tools = skill_cfg.get("mcp_tools", [])
+                        break
+            for mcp_ref in mcp_tools:
                 server_name = mcp_ref.get("server", "")
                 tools = mcp_ref.get("tools", [])
                 binding: dict | None = None
