@@ -161,54 +161,60 @@ def _build_skill_context(
 
     sandbox_config = None
     mcp_bindings: list[dict] = []
+
+    # Bind MCP tools for ANY skill that declares them (not just agents).
+    # Specialists like pr-context-enricher need Datadog/Jira MCP access.
     if loaded.metadata.role == SkillRole.AGENT:
         sandbox_config = SandboxConfig()
-        config_path = skill_dir / "agentura.config.yaml"
-        if config_path.exists():
-            try:
-                cfg = yaml.safe_load(config_path.read_text()) or {}
-                sandbox_raw = cfg.get("sandbox", {}) or cfg.get("agent", {})
-                if sandbox_raw:
-                    sandbox_config = SandboxConfig(**sandbox_raw)
-                gateway_api_key = os.environ.get("MCP_GATEWAY_API_KEY", "")
-                for mcp_ref in cfg.get("mcp_tools", []):
-                    server_name = mcp_ref.get("server", "")
-                    tools = mcp_ref.get("tools", [])
-                    binding: dict | None = None
 
-                    # 1. Explicit env var
-                    env_key = f"MCP_{server_name.upper().replace('-', '_')}_URL"
-                    server_url = os.environ.get(env_key, "")
-                    if server_url:
-                        binding = {"server": server_name, "url": server_url, "tools": tools}
-                        auth_key = f"MCP_{server_name.upper().replace('-', '_')}_API_KEY"
-                        api_key = os.environ.get(auth_key, "")
-                        if api_key:
-                            binding["headers"] = {"Authorization": f"Bearer {api_key}"}
+    config_path = skill_dir / "agentura.config.yaml"
+    if config_path.exists():
+        try:
+            cfg = yaml.safe_load(config_path.read_text()) or {}
+            sandbox_raw = cfg.get("sandbox", {}) or cfg.get("agent", {})
+            if sandbox_raw and sandbox_config is not None:
+                sandbox_config = SandboxConfig(**sandbox_raw)
+            gateway_api_key = os.environ.get("MCP_GATEWAY_API_KEY", "")
+            for mcp_ref in cfg.get("mcp_tools", []):
+                server_name = mcp_ref.get("server", "")
+                tools = mcp_ref.get("tools", [])
+                binding: dict | None = None
 
-                    # 2. MCP registry fallback (Obot auto-discovery)
-                    if binding is None:
-                        try:
-                            from agentura_sdk.mcp.registry import get_registry
-                            reg = get_registry()
-                            srv = reg.get(server_name)
-                            if srv and srv.url:
-                                binding = {"server": server_name, "url": srv.url, "tools": tools}
-                                if gateway_api_key:
-                                    binding["headers"] = {"Authorization": f"Bearer {gateway_api_key}"}
-                                logger.debug("MCP server %s resolved via registry: %s", server_name, srv.url)
-                        except Exception:
-                            pass
+                # 1. Explicit env var
+                env_key = f"MCP_{server_name.upper().replace('-', '_')}_URL"
+                server_url = os.environ.get(env_key, "")
+                if server_url:
+                    binding = {"server": server_name, "url": server_url, "tools": tools}
+                    auth_key = f"MCP_{server_name.upper().replace('-', '_')}_API_KEY"
+                    api_key = os.environ.get(auth_key, "")
+                    if api_key:
+                        binding["headers"] = {"Authorization": f"Bearer {api_key}"}
 
-                    if binding is None:
+                # 2. MCP registry fallback (Obot auto-discovery)
+                if binding is None:
+                    try:
+                        from agentura_sdk.mcp.registry import get_registry
+                        reg = get_registry()
+                        srv = reg.get(server_name)
+                        if srv and srv.url:
+                            binding = {"server": server_name, "url": srv.url, "tools": tools}
+                            if gateway_api_key:
+                                binding["headers"] = {"Authorization": f"Bearer {gateway_api_key}"}
+                            logger.debug("MCP server %s resolved via registry: %s", server_name, srv.url)
+                    except Exception:
+                        pass
+
+                if binding is None:
+                    if not mcp_ref.get("optional"):
                         logger.warning("MCP server %s: no URL found (env var %s not set, registry empty)", server_name, env_key)
-                        continue
+                    continue
 
-                    if mcp_ref.get("approval_required"):
-                        binding["approval_required"] = mcp_ref["approval_required"]
-                    mcp_bindings.append(binding)
-            except Exception:
-                pass
+                if mcp_ref.get("approval_required"):
+                    binding["approval_required"] = mcp_ref["approval_required"]
+                mcp_bindings.append(binding)
+                logger.info("MCP tool bound: %s → %s (%d tools)", server_name, binding["url"], len(tools))
+        except Exception:
+            pass
 
     return SkillContext(
         skill_name=loaded.metadata.name,
