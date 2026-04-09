@@ -371,7 +371,7 @@ agents:
   - domain: growth
     coordinator: growth-coordinator
     heartbeat:
-      every: "2h"
+      every: "4h"
       target: "${GROWTH_HEARTBEAT_CHANNEL}"
       observe: "C0ALSCUV7J8"
       model: "anthropic/claude-sonnet-4-5-20250929"
