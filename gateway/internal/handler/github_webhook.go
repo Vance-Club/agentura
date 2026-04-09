@@ -55,7 +55,7 @@ func init() {
 				return true
 			})
 			recentPRReviews.Range(func(key, value any) bool {
-				if ts, ok := value.(time.Time); ok && now.Sub(ts) > prReviewCooldown {
+				if ts, ok := value.(time.Time); ok && now.Sub(ts) > prRateLimit {
 					recentPRReviews.Delete(key)
 				}
 				return true
@@ -72,47 +72,58 @@ func isDuplicateDelivery(deliveryID string) bool {
 	return loaded
 }
 
-// prReviewCooldown controls how often the same PR can be auto-reviewed.
-// 8 hours: review once on open, skip subsequent pushes for a full work session.
-// Manual /shipwright review bypasses this (goes through issue_comment handler, not here).
-const prReviewCooldown = 8 * time.Hour
+// prRateLimit controls the minimum interval between reviews of the SAME PR
+// (regardless of SHA). Prevents rapid-push spam while still allowing new
+// commits to be reviewed after the window passes.
+const prRateLimit = 5 * time.Minute
 
-// isDuplicatePRReview checks if we've dispatched a review for this repo+PR
-// within the cooldown window. Uses both in-memory cache AND persistent DB check
-// so the dedup survives gateway restarts.
+// isDuplicatePRReview uses two layers of dedup:
+//  1. SHA-level: repo#pr#sha — same code = same review, always skip (in-memory).
+//  2. PR-level rate limit: repo#pr — prevents rapid push spam (in-memory + fleet store).
+//
+// Manual /shipwright review bypasses this (goes through issue_comment handler, not here).
 func isDuplicatePRReview(repo string, prNumber int, headSHA string) bool {
 	if repo == "" {
 		return false
 	}
-	key := fmt.Sprintf("%s#%d", repo, prNumber)
 	now := time.Now()
 
-	// In-memory fast path
-	if prev, loaded := recentPRReviews.Load(key); loaded {
-		if ts, ok := prev.(time.Time); ok && now.Sub(ts) < prReviewCooldown {
-			slog.Info("skipping duplicate PR review (in-memory cooldown)",
+	// Layer 1: SHA-level dedup — same commit = same review, always skip.
+	shaKey := fmt.Sprintf("%s#%d#%s", repo, prNumber, headSHA)
+	if _, loaded := recentPRReviews.Load(shaKey); loaded {
+		slog.Info("skipping duplicate PR review (same SHA already reviewed)",
+			"repo", repo, "pr", prNumber, "sha", headSHA[:7])
+		return true
+	}
+
+	// Layer 2: PR-level rate limit — different SHA, but too soon after last review.
+	prKey := fmt.Sprintf("%s#%d", repo, prNumber)
+	if prev, loaded := recentPRReviews.Load(prKey); loaded {
+		if ts, ok := prev.(time.Time); ok && now.Sub(ts) < prRateLimit {
+			slog.Info("skipping PR review (rate limit, new SHA too soon)",
 				"repo", repo, "pr", prNumber, "sha", headSHA[:7],
 				"last_review_ago", now.Sub(ts).Round(time.Second))
 			return true
 		}
 	}
 
-	// Persistent check: query executor for recent fleet sessions for this PR.
-	// This survives gateway restarts — the in-memory check is just a fast path.
+	// Layer 2 (persistent): fleet store survives gateway restarts.
 	if isDuplicateInFleetStore(repo, prNumber) {
-		slog.Info("skipping duplicate PR review (fleet store cooldown)",
+		slog.Info("skipping PR review (fleet store rate limit)",
 			"repo", repo, "pr", prNumber, "sha", headSHA[:7])
-		recentPRReviews.Store(key, now) // warm the in-memory cache
+		recentPRReviews.Store(prKey, now) // warm the in-memory cache
 		return true
 	}
 
-	recentPRReviews.Store(key, now)
+	// Record both keys: SHA seen forever, PR-level timestamp for rate limiting.
+	recentPRReviews.Store(shaKey, true)
+	recentPRReviews.Store(prKey, now)
 	return false
 }
 
 // isDuplicateInFleetStore checks the executor's fleet store for a recent
-// session for this repo+PR. Returns true if a session was created in the
-// last 5 minutes (meaning a review is already in progress or just completed).
+// session for this repo+PR. Returns true if a session was created within
+// the PR rate-limit window (review in progress or just completed).
 func isDuplicateInFleetStore(repo string, prNumber int) bool {
 	// Query the executor's fleet sessions API
 	url := fmt.Sprintf("http://executor:8000/api/v1/fleet/sessions?repo=%s&pr=%d&limit=1",
@@ -152,7 +163,7 @@ func isDuplicateInFleetStore(repo string, prNumber int) bool {
 			return false
 		}
 	}
-	return time.Since(created) < prReviewCooldown
+	return time.Since(created) < prRateLimit
 }
 
 // GitHubTokenProvider generates fresh GitHub API tokens on demand.
