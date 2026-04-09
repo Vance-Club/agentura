@@ -614,17 +614,21 @@ async def _maybe_post_pr_review(
             # after false positive rate < 10% across 50+ reviews.
             event = "COMMENT"
 
-            await github_client.post_review(
-                repo=repo,
-                pr_number=int(pr_number),
-                comments=inline_comments,
-                body=summary,
-                event=event,
-                commit_id=head_sha,
-                token=token,
-            )
-            logger.info("posted PR inline review on %s#%s (%d comments, event=%s)",
-                        repo, pr_number, len(inline_comments), event)
+            # Dedup: check if the last bot review has the same inline findings
+            if await _is_duplicate_review(repo, int(pr_number), inline_comments, token):
+                logger.info("skipping duplicate inline review for PR #%s", pr_number)
+            else:
+                await github_client.post_review(
+                    repo=repo,
+                    pr_number=int(pr_number),
+                    comments=inline_comments,
+                    body=summary,
+                    event=event,
+                    commit_id=head_sha,
+                    token=token,
+                )
+                logger.info("posted PR inline review on %s#%s (%d comments, event=%s)",
+                            repo, pr_number, len(inline_comments), event)
         except Exception as e:
             logger.error("failed to post PR inline review on %s#%s: %s", repo, pr_number, e, exc_info=True)
     else:
@@ -640,10 +644,70 @@ async def _maybe_post_pr_review(
             logger.info("skipping duplicate review comment on %s#%s — findings unchanged", repo, pr_number)
         else:
             try:
-                await github_client.post_comment(repo=repo, pr_number=int(pr_number), body=body, token=token)
+                await github_client.upsert_comment(repo=repo, pr_number=int(pr_number), body=body, token=token)
                 logger.info("posted PR summary comment on %s#%s", repo, pr_number)
             except Exception as e:
                 logger.error("failed to post PR summary comment on %s#%s: %s", repo, pr_number, e)
+
+
+async def _is_duplicate_review(
+    repo: str, pr_number: int, comments: list[dict], token: str,
+) -> bool:
+    """Check if the inline review would duplicate the most recent bot review.
+
+    Hashes the sorted list of (file, line, body) tuples for the current review
+    and compares against the inline comments from the last bot review. If they
+    match, the review is a duplicate and should be skipped.
+    """
+    import hashlib
+    try:
+        reviews = await github_client.get_pr_reviews(repo, pr_number, token)
+        bot_reviews = [
+            r for r in reviews
+            if r.get("user", {}).get("login") == "shipwright-crew[bot]"
+        ]
+        if not bot_reviews:
+            return False
+
+        last_review = bot_reviews[-1]
+        review_id = last_review["id"]
+
+        # Fetch inline comments from the most recent bot review
+        old_comments = await github_client.get_review_comments(
+            repo, pr_number, review_id, token,
+        )
+
+        def _comments_hash(items: list[tuple[str, int, str]]) -> str:
+            normalized = sorted(items)
+            return hashlib.md5(str(normalized).encode()).hexdigest()
+
+        old_tuples = [
+            (c.get("path", ""), c.get("line") or c.get("original_line", 0), c.get("body", ""))
+            for c in old_comments
+        ]
+        new_tuples = [
+            (c.get("path", ""), c.get("line", 0), c.get("body", ""))
+            for c in comments
+        ]
+
+        old_hash = _comments_hash(old_tuples)
+        new_hash = _comments_hash(new_tuples)
+
+        if old_hash == new_hash:
+            logger.info(
+                "skipping duplicate inline review on %s#%d — findings unchanged (hash: %s)",
+                repo, pr_number, old_hash[:8],
+            )
+            return True
+
+        logger.info(
+            "inline findings changed on %s#%d — posting new review (old: %s, new: %s)",
+            repo, pr_number, old_hash[:8], new_hash[:8],
+        )
+        return False
+    except Exception as e:
+        logger.debug("inline review duplicate check failed (allowing post): %s", e)
+        return False
 
 
 async def _is_duplicate_review_comment(repo: str, pr_number: int, new_body: str, token: str) -> bool:
