@@ -92,7 +92,7 @@ func isDuplicatePRReview(repo string, prNumber int, headSHA string) bool {
 	shaKey := fmt.Sprintf("%s#%d#%s", repo, prNumber, headSHA)
 	if _, loaded := recentPRReviews.Load(shaKey); loaded {
 		slog.Info("skipping duplicate PR review (same SHA already reviewed)",
-			"repo", repo, "pr", prNumber, "sha", headSHA[:7])
+			"repo", repo, "pr", prNumber, "sha", headSHA)
 		return true
 	}
 
@@ -101,7 +101,7 @@ func isDuplicatePRReview(repo string, prNumber int, headSHA string) bool {
 	if prev, loaded := recentPRReviews.Load(prKey); loaded {
 		if ts, ok := prev.(time.Time); ok && now.Sub(ts) < prRateLimit {
 			slog.Info("skipping PR review (rate limit, new SHA too soon)",
-				"repo", repo, "pr", prNumber, "sha", headSHA[:7],
+				"repo", repo, "pr", prNumber, "sha", headSHA,
 				"last_review_ago", now.Sub(ts).Round(time.Second))
 			return true
 		}
@@ -110,7 +110,7 @@ func isDuplicatePRReview(repo string, prNumber int, headSHA string) bool {
 	// Layer 2 (persistent): fleet store survives gateway restarts.
 	if isDuplicateInFleetStore(repo, prNumber) {
 		slog.Info("skipping PR review (fleet store rate limit)",
-			"repo", repo, "pr", prNumber, "sha", headSHA[:7])
+			"repo", repo, "pr", prNumber, "sha", headSHA)
 		recentPRReviews.Store(prKey, now) // warm the in-memory cache
 		return true
 	}
