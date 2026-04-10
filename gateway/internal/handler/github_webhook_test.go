@@ -152,6 +152,10 @@ func TestGitHubWebhookHandler_PullRequest(t *testing.T) {
 
 	for i, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Clear global dedup state between test cases to avoid cross-contamination
+			recentDeliveries.Range(func(key, _ any) bool { recentDeliveries.Delete(key); return true })
+			recentPRReviews.Range(func(key, _ any) bool { recentPRReviews.Delete(key); return true })
+
 			// Mock executor that accepts pipeline dispatch
 			mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
