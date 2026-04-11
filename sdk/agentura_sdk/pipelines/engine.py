@@ -571,6 +571,154 @@ def _record_reflexion_feedback(all_results: list[dict], input_data: dict) -> Non
         )
 
 
+def _normalize_finding_body(body: str) -> str:
+    """Normalize a finding body for fuzzy comparison.
+
+    Strips severity prefixes, emojis, delta labels, markdown formatting,
+    then lowercases and collapses whitespace.
+    """
+    import re
+    text = body
+    # Strip delta label prefixes from previous reviews
+    for prefix in ("🆕 **NEW** ", "🔄 **STILL OPEN** "):
+        text = text.replace(prefix, "")
+    # Strip severity emoji prefixes like :rotating_light: **BLOCKER**:
+    text = re.sub(r":[a-z_]+:\s*\*\*[A-Z]+\*\*:\s*", "", text)
+    # Strip markdown bold/italic
+    text = re.sub(r"\*+", "", text)
+    # Strip code blocks
+    text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+    # Collapse whitespace
+    text = re.sub(r"\s+", " ", text).strip().lower()
+    return text
+
+
+def _token_overlap(a: str, b: str) -> float:
+    """Compute token overlap similarity between two normalized strings."""
+    tokens_a = set(a.split())
+    tokens_b = set(b.split())
+    if not tokens_a or not tokens_b:
+        return 0.0
+    intersection = tokens_a & tokens_b
+    return len(intersection) / max(len(tokens_a), len(tokens_b))
+
+
+def _match_finding(
+    path: str, line: int, body: str,
+    previous: list[tuple[str, int, str]],
+) -> bool:
+    """Check if a current finding matches any previous finding.
+
+    Match criteria: exact path, line within +-5, body similarity > 0.7.
+    """
+    norm_body = _normalize_finding_body(body)
+    for prev_path, prev_line, prev_body in previous:
+        if path != prev_path:
+            continue
+        if abs(line - prev_line) > 5:
+            continue
+        if _token_overlap(norm_body, prev_body) > 0.7:
+            return True
+    return False
+
+
+async def _fetch_previous_findings(
+    repo: str, pr_number: int, token: str,
+) -> list[tuple[str, int, str]]:
+    """Fetch inline comments from the most recent Shipwright bot review.
+
+    Returns list of (path, line, normalized_body) tuples.
+    """
+    from agentura_sdk.pipelines import github_client
+
+    try:
+        reviews = await github_client.get_pr_reviews(repo, pr_number, token)
+        bot_reviews = [
+            r for r in reviews
+            if r.get("user", {}).get("login") == "shipwright-crew[bot]"
+        ]
+        if not bot_reviews:
+            return []
+
+        last_review = bot_reviews[-1]
+        review_id = last_review["id"]
+        old_comments = await github_client.get_review_comments(
+            repo, pr_number, review_id, token,
+        )
+
+        findings: list[tuple[str, int, str]] = []
+        for c in old_comments:
+            path = c.get("path", "")
+            line = c.get("line") or c.get("original_line", 0)
+            body = _normalize_finding_body(c.get("body", ""))
+            if path and body:
+                findings.append((path, line, body))
+        return findings
+    except Exception as e:
+        logger.debug("failed to fetch previous findings: %s", e)
+        return []
+
+
+def _compute_delta(
+    inline_comments: list[dict],
+    previous_findings: list[tuple[str, int, str]],
+) -> tuple[list[dict], list[tuple[str, int, str]]]:
+    """Label each inline comment as NEW or PERSISTS, and find RESOLVED findings.
+
+    Returns (labeled_comments, resolved_findings).
+    """
+    labeled: list[dict] = []
+    matched_previous: set[int] = set()
+
+    for comment in inline_comments:
+        path = comment["path"]
+        line = comment["line"]
+        body = comment["body"]
+        norm_body = _normalize_finding_body(body)
+
+        is_match = False
+        for idx, (prev_path, prev_line, prev_body) in enumerate(previous_findings):
+            if path != prev_path:
+                continue
+            if abs(line - prev_line) > 5:
+                continue
+            if _token_overlap(norm_body, prev_body) > 0.7:
+                is_match = True
+                matched_previous.add(idx)
+                break
+
+        delta_label = "PERSISTS" if is_match else "NEW"
+        prefix = "🆕 **NEW** " if delta_label == "NEW" else "🔄 **STILL OPEN** "
+        labeled.append({
+            **comment,
+            "body": prefix + body,
+            "delta_label": delta_label,
+        })
+
+    # RESOLVED = previous findings not matched by any current finding
+    resolved: list[tuple[str, int, str]] = [
+        previous_findings[idx]
+        for idx in range(len(previous_findings))
+        if idx not in matched_previous
+    ]
+
+    return labeled, resolved
+
+
+def _build_delta_summary(
+    new_count: int, persists_count: int, resolved_count: int,
+) -> str:
+    """Build the delta summary section for the review comment."""
+    lines = ["### Review Delta"]
+    if new_count:
+        lines.append(f"- 🆕 **{new_count} new finding{'s' if new_count != 1 else ''}** since last review")
+    if persists_count:
+        lines.append(f"- 🔄 **{persists_count} finding{'s' if persists_count != 1 else ''} still open** from previous review")
+    if resolved_count:
+        lines.append(f"- ✅ **{resolved_count} finding{'s' if resolved_count != 1 else ''} resolved** — nice work!")
+    return "\n".join(lines)
+
+
 async def _maybe_post_pr_review(
     pipeline_name: str,
     input_data: dict[str, Any],
@@ -597,6 +745,12 @@ async def _maybe_post_pr_review(
         logger.warning("GITHUB_TOKEN not set — skipping PR review posting")
         return
 
+    # Fetch previous findings for delta computation
+    previous_findings = await _fetch_previous_findings(repo, int(pr_number), token)
+    has_previous = len(previous_findings) > 0
+    delta_summary_section = ""
+    resolved_findings: list[tuple[str, int, str]] = []
+
     # Post inline review from code reviewer findings
     review_output = _extract_reviewer_output(all_results)
     logger.info("reviewer output extracted: has_findings=%s, verdict=%s, keys=%s",
@@ -607,6 +761,20 @@ async def _maybe_post_pr_review(
         try:
             inline_comments = _format_review_comments(review_output)
             summary = review_output.get("summary", "Automated review by Agentura")
+
+            # Compute delta labels if there was a previous review
+            if has_previous:
+                inline_comments, resolved_findings = _compute_delta(
+                    inline_comments, previous_findings,
+                )
+                new_count = sum(1 for c in inline_comments if c.get("delta_label") == "NEW")
+                persists_count = sum(1 for c in inline_comments if c.get("delta_label") == "PERSISTS")
+                resolved_count = len(resolved_findings)
+                delta_summary_section = _build_delta_summary(new_count, persists_count, resolved_count)
+                logger.info(
+                    "delta computed for %s#%s: %d new, %d persists, %d resolved",
+                    repo, pr_number, new_count, persists_count, resolved_count,
+                )
 
             # Always use COMMENT — never REQUEST_CHANGES during beta rollout.
             # REQUEST_CHANGES blocks merge, which is too aggressive before
@@ -639,6 +807,25 @@ async def _maybe_post_pr_review(
     logger.debug("reporter final_output keys=%s", list(final_output.keys()) if isinstance(final_output, dict) else type(final_output))
     body = final_output.get("raw_output") or final_output.get("output", "")
     if body:
+        # Prepend delta summary section if this is a follow-up review
+        if delta_summary_section:
+            # Insert delta summary after the first heading line
+            lines = body.split("\n")
+            insert_idx = 0
+            for i, line in enumerate(lines):
+                if line.startswith("## "):
+                    insert_idx = i + 1
+                    break
+            resolved_note = ""
+            if resolved_findings:
+                resolved_note = "\n\n**Resolved findings:**\n"
+                for path, line_no, norm_body in resolved_findings:
+                    # Show first ~80 chars of the normalized body
+                    snippet = norm_body[:80] + ("..." if len(norm_body) > 80 else "")
+                    resolved_note += f"- ~~`{path}:{line_no}` — {snippet}~~\n"
+            lines.insert(insert_idx, "\n" + delta_summary_section + resolved_note + "\n")
+            body = "\n".join(lines)
+
         # Dedup: check if the last Shipwright comment has the same findings
         if await _is_duplicate_review_comment(repo, int(pr_number), body, token):
             logger.info("skipping duplicate review comment on %s#%s — findings unchanged", repo, pr_number)
