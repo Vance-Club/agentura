@@ -96,13 +96,13 @@ func TestGitHubWebhookHandler_PullRequest(t *testing.T) {
 			wantBody:   `"status":"accepted"`,
 		},
 		{
-			name:       "synchronize PR accepted",
+			name:       "synchronize PR debounced",
 			event:      "pull_request",
 			body:       strings.Replace(prPayload, `"opened"`, `"synchronize"`, 1),
 			secret:     "test-secret",
 			addSig:     true,
 			wantStatus: http.StatusOK,
-			wantBody:   `"status":"accepted"`,
+			wantBody:   `"status":"debounced"`,
 		},
 		{
 			name:       "closed PR ignored",
@@ -155,6 +155,13 @@ func TestGitHubWebhookHandler_PullRequest(t *testing.T) {
 			// Clear global dedup state between test cases to avoid cross-contamination
 			recentDeliveries.Range(func(key, _ any) bool { recentDeliveries.Delete(key); return true })
 			recentPRReviews.Range(func(key, _ any) bool { recentPRReviews.Delete(key); return true })
+			pendingReviews.Range(func(key, val any) bool {
+				if pr, ok := val.(*pendingReview); ok {
+					pr.timer.Stop()
+				}
+				pendingReviews.Delete(key)
+				return true
+			})
 
 			// Mock executor that accepts pipeline dispatch
 			mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
