@@ -110,6 +110,34 @@ SANDBOX_TOOLS = [
         },
     },
     {
+        "name": "git_codebase",
+        "description": (
+            "Run a read-only git command against a mounted codebase. Supports shell pipes. "
+            "Supported git sub-commands: log, blame, show, diff, shortlog, ls-files, grep. "
+            "Use this to answer 'who wrote X', 'what changed in X', 'find files matching X'. "
+            "The codebase is already present — do NOT use clone_repo. "
+            "Android source files live under app/src/main/java/ (not kotlin/). "
+            "To find a file: 'git ls-files | grep FileName'. "
+            "To get author: 'git log --follow -1 --format=\"%an\" -- <path>'. "
+            "To blame a file: 'git blame <path>'. "
+            "To see contributors: 'git shortlog -sne --all | head -20'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "Full git command to run, e.g. 'git blame path/to/File.kt'",
+                },
+                "codebase": {
+                    "type": "string",
+                    "description": "Which codebase to query: 'android' (default) or 'ios'",
+                },
+            },
+            "required": ["command"],
+        },
+    },
+    {
         "name": "task_complete",
         "description": "Signal that the task is finished. Provide a summary of what was built and any output URLs or file paths.",
         "input_schema": {
@@ -380,9 +408,73 @@ def _execute_tool(
         return _create_branch(sandbox, tool_input)
     if tool_name == "create_pr":
         return _create_pr(sandbox, tool_input)
+    if tool_name == "git_codebase":
+        return _git_codebase(tool_input)
     if tool_name == "task_complete":
         return json.dumps(tool_input)
     return f"Unknown tool: {tool_name}"
+
+
+_CODEBASE_ROOTS = {
+    "android": "/codebase/vance-android",
+    "ios": "/codebase/vance-ios",
+}
+
+_GIT_ALLOWED_SUBCMDS = {"log", "blame", "show", "diff", "shortlog", "ls-files", "grep"}
+
+
+def _git_codebase(params: dict) -> str:
+    """Run a read-only git command directly in the executor process against a mounted codebase.
+
+    Supports shell pipes (e.g. 'git ls-files | grep Foo') by running via /bin/sh.
+    The codebase is mounted read-only so write operations are blocked at the filesystem level.
+    """
+    import shlex
+    import subprocess as sp
+
+    command = params.get("command", "").strip()
+    codebase = params.get("codebase", "android").lower()
+
+    repo_dir = _CODEBASE_ROOTS.get(codebase)
+    if not repo_dir:
+        return f"[error] unknown codebase '{codebase}'. Use 'android' or 'ios'."
+
+    import os as _os
+    if not _os.path.isdir(repo_dir):
+        return f"[error] codebase not found at {repo_dir}"
+
+    if not command:
+        return "[error] empty command"
+
+    # Strip leading 'git' to check the subcommand
+    try:
+        tokens = shlex.split(command.split("|")[0].strip())  # check first segment before any pipe
+    except ValueError:
+        tokens = command.split()
+
+    first_tokens = tokens[1:] if tokens and tokens[0] == "git" else tokens
+    subcmd = first_tokens[0] if first_tokens else ""
+    if subcmd and subcmd not in _GIT_ALLOWED_SUBCMDS:
+        return (
+            f"[error] git sub-command '{subcmd}' is not allowed. "
+            f"Allowed: {', '.join(sorted(_GIT_ALLOWED_SUBCMDS))}"
+        )
+
+    # Prepend 'cd <repo> &&' so pipes and relative paths work correctly
+    shell_cmd = f"cd {shlex.quote(repo_dir)} && {command}"
+
+    try:
+        result = sp.run(shell_cmd, shell=True, capture_output=True, text=True, timeout=30)
+        output = (result.stdout or "") + (result.stderr or "")
+        output = output.strip() or "(no output)"
+        # Truncate very long output to avoid flooding the context
+        if len(output) > 8000:
+            output = output[:8000] + "\n... [truncated]"
+        return output
+    except sp.TimeoutExpired:
+        return "[error] git command timed out after 30s"
+    except Exception as exc:
+        return f"[error] {exc}"
 
 
 def _clone_repo(sandbox: object, params: dict) -> str:

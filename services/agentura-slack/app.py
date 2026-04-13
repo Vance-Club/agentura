@@ -54,7 +54,10 @@ def _parse_command(text: str) -> tuple[str, str]:
     return subcommand, args
 
 
-def _dispatch(say, subcommand: str, args: str):
+KNOWN_COMMANDS = {"run", "exec", "execute", "approve", "reject", "status", "approvals", "pending", "skills", "list", "help"}
+
+
+def _dispatch(say, subcommand: str, args: str, full_text: str = "", user_id: str = ""):
     """Route a parsed command to the right handler."""
     if subcommand in ("run", "exec", "execute"):
         _handle_run(say, args)
@@ -68,8 +71,12 @@ def _dispatch(say, subcommand: str, args: str):
         _handle_list_approvals(say)
     elif subcommand in ("skills", "list"):
         _handle_list_skills(say)
-    else:
+    elif subcommand == "help":
         _handle_help(say)
+    else:
+        # Treat unrecognised input as a free-form question → code-review-bot
+        question = full_text.strip() or f"{subcommand} {args}".strip()
+        _handle_question(say, question, user_id=user_id)
 
 
 # ─── @mention handler (works without slash command setup) ──────────
@@ -78,22 +85,43 @@ def _dispatch(say, subcommand: str, args: str):
 def handle_mention(event, say):
     """Handle @CortexMesh mentions in channels."""
     text = event.get("text", "")
+    user_id = event.get("user", "")
     subcommand, args = _parse_command(text)
-    _dispatch(say, subcommand, args)
+    # Strip the bot mention to get the clean question text
+    clean_text = re.sub(r"<@[A-Z0-9]+>\s*", "", text).strip()
+    _dispatch(say, subcommand, args, full_text=clean_text, user_id=user_id)
 
 
 @app.event("message")
 def handle_dm(event, say):
-    """Handle direct messages to the bot."""
-    # Only respond to DMs (im), not channel messages
-    if event.get("channel_type") != "im":
-        return
+    """Handle direct messages and channel messages with the 'ask' keyword."""
     # Ignore bot's own messages
     if event.get("bot_id"):
         return
-    text = event.get("text", "")
-    subcommand, args = _parse_command(text)
-    _dispatch(say, subcommand, args)
+    # Ignore message edits/deletes
+    if event.get("subtype"):
+        return
+
+    text = (event.get("text") or "").strip()
+    user_id = event.get("user", "")
+    channel_type = event.get("channel_type", "")
+
+    if channel_type == "im":
+        # DM — treat the whole message as a command
+        subcommand, args = _parse_command(text)
+        _dispatch(say, subcommand, args, full_text=text, user_id=user_id)
+
+    elif text.lower().startswith(("ask ", "ask:")):
+        # Channel message starting with "ask " or "ask:" — route to code review bot
+        question = re.sub(r"^ask[: ]+", "", text, flags=re.IGNORECASE).strip()
+        print(f"[ask-keyword] user={user_id} q={question[:80]}", flush=True)
+        _handle_question(say, question, user_id=user_id)
+
+    elif text.lower().startswith(("run ", "agentura run ")):
+        # Channel message starting with "run " or "agentura run "
+        skill = re.sub(r"^(agentura\s+)?run\s+", "", text, flags=re.IGNORECASE).strip()
+        print(f"[run-keyword] user={user_id} skill={skill}", flush=True)
+        _handle_run(say, skill)
 
 
 # ─── Slash command handler (if /agentura is configured) ────────────
@@ -102,27 +130,34 @@ def handle_dm(event, say):
 def handle_command(ack, command, say):
     ack()
     text = command.get("text", "").strip()
+    user_id = command.get("user_id", "")
     subcommand, args = _parse_command(text)
-    _dispatch(say, subcommand, args)
+    _dispatch(say, subcommand, args, full_text=text, user_id=user_id)
 
 
 # ─── Command implementations ──────────────────────────────────────
 
 def _handle_help(say):
     say(
+        text="Agentura Help",
         blocks=[
             {
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": "*Agentura Commands*\n\n"
-                    "`run <domain/skill>` — Execute a skill\n"
+                    "text": "*How to use the bot*\n\n"
+                    "*Ask a question (any channel):*\n"
+                    "`ask <your question>` — routes to Android or iOS code review bot\n"
+                    "_e.g._ `ask who wrote the send flow?`\n"
+                    "_e.g._ `ask how does navigation work in iOS?`\n\n"
+                    "*Run a skill (any channel):*\n"
+                    "`run <domain/skill>` — execute a specific skill\n"
+                    "_e.g._ `run dev/code-review-bot`\n\n"
+                    "*Other commands (via DM or @mention):*\n"
                     "`status` — Platform health\n"
-                    "`skills` — List all skills\n"
-                    "`approvals` — Pending approvals\n"
-                    "`approve <id>` — Approve execution\n"
-                    "`reject <id>` — Reject execution\n\n"
-                    "_Use via @mention, DM, or `/agentura` slash command_",
+                    "`skills` — List all deployed skills\n"
+                    "`approvals` — Pending approvals\n\n"
+                    "_You can also @mention the bot or DM it directly._",
                 },
             }
         ]
@@ -301,6 +336,132 @@ def _format_skill_output(skill_path: str, raw: str) -> list[dict] | None:
     if "goal-planner" in skill_path and data.get("feasibility"):
         return _format_goal_planner(data)
     return None
+
+
+def _detect_platform(question: str) -> str:
+    """Return 'ios' or 'android' based on keywords in the question."""
+    q = question.lower()
+    ios_keywords = ["ios", "swift", "swiftui", "xcode", "iphone", "cocoapods", "viewmodel", "usecase", "coordinator", "router", "uikit"]
+    android_keywords = ["android", "kotlin", "compose", "gradle", "fragment", "activity", "viewmodel", "room", "hilt", "coroutine"]
+    ios_score = sum(1 for k in ios_keywords if k in q)
+    android_score = sum(1 for k in android_keywords if k in q)
+    return "ios" if ios_score > android_score else "android"
+
+
+def _detect_role(question: str) -> str:
+    """Deduce whether the asker is a 'product_manager' or 'developer' from the question text.
+
+    Strategy:
+    - Start with PM score = 1 (slight bias toward PM for plain questions)
+    - Add to PM score for business/user/conceptual signals
+    - Add to dev score only for specific technical signals
+    - Developer wins only when there are clear technical markers
+    """
+    q = question.lower()
+
+    # Strong PM signals — asking for conceptual understanding, user impact, business context
+    pm_signals = [
+        ("why do we", 3), ("why does this", 3), ("why is there", 2),
+        ("what does", 2), ("what is the purpose", 3), ("what is the goal", 3),
+        ("user experience", 3), ("user journey", 3), ("user flow", 2),
+        ("from a user", 3), ("from the user", 3), ("from a product", 3),
+        ("business", 2), ("customer", 2), ("impact", 2), ("roadmap", 3),
+        ("timeline", 2), ("strategy", 2), ("non-technical", 3), ("non technical", 3),
+        ("in simple terms", 3), ("explain simply", 3), ("plain english", 3),
+        ("high level", 2), ("overview", 2), ("tell me about", 2),
+        ("explain", 1), ("how does", 1), ("what happens", 1),
+        ("what is", 1), ("what are", 1), ("how do users", 2), ("what can", 1),
+    ]
+
+    # Strong dev signals — asking for code, files, specific implementation details
+    dev_signals = [
+        ("which file", 4), ("file path", 4), ("which class", 4), ("class name", 4),
+        ("which function", 4), ("which method", 4), ("how to implement", 4),
+        ("how do i", 3), ("how can i", 3), ("how to fix", 3),
+        ("bug", 3), ("crash", 3), ("error", 3), ("exception", 3), ("stacktrace", 4),
+        ("git blame", 4), ("git log", 4), ("who wrote", 3), ("who built", 3), ("contributor", 3),
+        ("commit", 2), ("pull request", 3), ("pr ", 2), ("merge", 2),
+        ("gradle", 4), ("hilt", 4), ("coroutine", 4), ("viewmodel", 3),
+        ("repository", 3), ("usecase", 3), ("dependency injection", 4), (" di ", 3),
+        ("unit test", 3), ("test case", 3), ("mock", 3),
+        ("api endpoint", 4), ("rest api", 3), ("network call", 3), ("retrofit", 4),
+        ("room database", 4), ("sql query", 4), ("schema", 3),
+        ("refactor", 3), ("migration", 2), ("compile", 3), ("build error", 4),
+        ("swift ", 2), ("swiftui ", 2), ("kotlin ", 2), ("compose ", 2),
+    ]
+
+    # Slight default bias toward PM (plain questions like "how does X work?" → PM)
+    pm_score = 1
+    dev_score = 0
+
+    for signal, weight in pm_signals:
+        if signal in q:
+            pm_score += weight
+
+    for signal, weight in dev_signals:
+        if signal in q:
+            dev_score += weight
+
+    role = "product_manager" if pm_score >= dev_score else "developer"
+    print(f"[role-detect] pm={pm_score} dev={dev_score} → {role} | q={question[:60]}", flush=True)
+    return role
+
+
+def _handle_question(say, question: str, user_id: str = ""):
+    """Forward a free-form question to the appropriate code review bot."""
+    if not question:
+        _handle_help(say)
+        return
+    platform = _detect_platform(question)
+    role = _detect_role(question)
+    skill_path = "dev/ios-code-review-bot" if platform == "ios" else "dev/code-review-bot"
+    platform_label = "iOS" if platform == "ios" else "Android"
+    role_label = "PM" if role == "product_manager" else "Dev"
+    print(f"[question] platform={platform} role={role} skill={skill_path} q={question[:80]}", flush=True)
+    say(f":hourglass_flowing_sand: [{role_label}] Looking into your {platform_label} question... (may take up to 90s)")
+    try:
+        result = _api_post(
+            f"/api/v1/skills/{skill_path}/execute",
+            {"input_data": {"question": question, "user_id": user_id or "developer", "role": role}},
+        )
+        print(f"[question] result success={result.get('success')} output_keys={list(result.get('output', {}).keys())}", flush=True)
+        success = result.get("success", False)
+        output = result.get("output", {})
+        # agent skills return output.summary; specialist skills return output.raw_output
+        raw = output.get("raw_output") or output.get("summary") or output.get("error")
+        # Fallback: stitch together tool outputs from iterations if no summary was produced
+        if not raw:
+            iterations = output.get("iterations", [])
+            if iterations:
+                last = iterations[-1]
+                raw = last.get("tool_output", "") or "No response"
+            else:
+                raw = "No response"
+
+        latency = result.get("latency_ms", 0)
+        latency_str = f"{latency / 1000:.1f}s" if latency > 1000 else f"{latency:.0f}ms"
+        answer_preview = raw[:60].replace("\n", " ")
+        print(f"[question] sending answer: {answer_preview!r}", flush=True)
+
+        role_icon = ":briefcase:" if role == "product_manager" else ":technologist:"
+        header = {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"{'✅' if success else '❌'} *Code Review Bot* {role_icon} _{role_label}_ — {latency_str} | `${result.get('cost_usd', 0):.4f}`",
+            },
+        }
+        body = {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": raw[:3000]},
+        }
+        say(text=raw[:200], blocks=[header, {"type": "divider"}, body])
+    except httpx.HTTPStatusError as e:
+        print(f"[question] HTTP error: {e.response.status_code} {e.response.text[:200]}", flush=True)
+        say(f":x: Error: {e.response.status_code} — {e.response.text[:300]}")
+    except Exception as e:
+        print(f"[question] exception: {e}", flush=True)
+        say(f":x: Error: {e}")
 
 
 def _handle_run(say, args: str):

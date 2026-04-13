@@ -5,16 +5,21 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8000:8000"
+    user: root
     volumes:
-      - ./skills:/skills:rw
+      - /Users/apple/AndroidStudioProjects/agentura-skills/skills:/skills:rw
       - agentura-knowledge:/data/.agentura
+      - /Users/apple/AndroidStudioProjects/vance-mobile/vance-android:/codebase/vance-android:ro
+      - /Users/apple/AndroidStudioProjects/vance-ios:/codebase/vance-ios:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       SKILLS_DIR: /skills
       AGENTURA_KNOWLEDGE_DIR: /data/.agentura
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       DATABASE_URL: postgresql://agentura:${DB_PASSWORD:-agentura_dev}@postgres:5432/agentura
       AUTH_REQUIRED: ${AUTH_REQUIRED:-false}
+      SANDBOX_BACKEND: none
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 10s
@@ -32,7 +37,7 @@ services:
       - "3001:3001"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./skills:/skills:ro
+      - /Users/apple/AndroidStudioProjects/agentura-skills/skills:/skills:ro
     environment:
       DB_HOST: postgres
       DB_PORT: "5432"
@@ -42,7 +47,7 @@ services:
       EXECUTOR_URL: http://executor:8000
       EXECUTION_MODE: ${EXECUTION_MODE:-proxy}
       SKILL_RUNNER_IMAGE: ${SKILL_RUNNER_IMAGE:-agentura/skill-runner:latest}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       AUTH_ENABLED: ${AUTH_ENABLED:-false}
       JWKS_URL: ${JWKS_URL:-}
