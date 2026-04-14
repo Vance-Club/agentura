@@ -248,6 +248,23 @@ def _count_guardrails(domain_dir: Path) -> int:
     return len(re.findall(r"##\s+GRD-\d+", grd_file.read_text()))
 
 
+def _load_role_prompt(skill_root: Path, input_data: dict) -> str:
+    """Load a role-specific prompt from prompts/<role>.md if it exists.
+
+    Normalises input_data['role'] values like 'product_manager' → 'product-manager'
+    and 'developer' → 'developer', then returns the file contents or an empty string.
+    """
+    role_raw = (input_data or {}).get("role", "")
+    if not role_raw:
+        return ""
+    # Normalise: underscores → hyphens, lowercase
+    role_slug = str(role_raw).lower().replace("_", "-")
+    prompt_file = skill_root / "prompts" / f"{role_slug}.md"
+    if prompt_file.exists():
+        return prompt_file.read_text().strip()
+    return ""
+
+
 def _count_corrections(skill_dir: Path) -> int:
     """Count test entries in tests/generated/corrections.yaml."""
     corr_file = skill_dir / "tests" / "generated" / "corrections.yaml"
@@ -706,7 +723,7 @@ async def execute(domain: str, skill_name: str, req: ExecuteRequest, request: Re
 
     model = req.model_override or skill_md.metadata.model
 
-    # Compose system prompt: WORKSPACE + DOMAIN + Reflexion + ProjectConfigs + SKILL
+    # Compose system prompt: WORKSPACE + DOMAIN + Reflexion + ProjectConfigs + RolePrompt + SKILL
     prompt_parts = []
     if skill_md.workspace_context:
         prompt_parts.append(skill_md.workspace_context)
@@ -717,6 +734,9 @@ async def execute(domain: str, skill_name: str, req: ExecuteRequest, request: Re
     project_configs = _load_project_configs(SKILLS_DIR / domain)
     if project_configs:
         prompt_parts.append(project_configs)
+    role_prompt = _load_role_prompt(root, input_data)
+    if role_prompt:
+        prompt_parts.append(role_prompt)
     prompt_parts.append(skill_md.system_prompt)
     composed_prompt = "\n\n---\n\n".join(prompt_parts)
 
@@ -865,6 +885,9 @@ async def execute_stream(domain: str, skill_name: str, req: ExecuteRequest):
     project_configs = _load_project_configs(SKILLS_DIR / domain)
     if project_configs:
         prompt_parts.append(project_configs)
+    role_prompt = _load_role_prompt(root, input_data)
+    if role_prompt:
+        prompt_parts.append(role_prompt)
     prompt_parts.append(skill_md.system_prompt)
     composed_prompt = "\n\n---\n\n".join(prompt_parts)
 

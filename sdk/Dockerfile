@@ -21,9 +21,12 @@ COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/pytho
 COPY --from=builder /usr/local/bin/agentura-server /usr/local/bin/agentura-server
 COPY --from=builder /build/agentura_sdk/ /app/agentura_sdk/
 
-RUN mkdir -p /data/.agentura && chown -R 1000:1000 /data
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh \
+    && mkdir -p /data/.agentura /skills /codebase/vance-android /codebase/vance-ios \
+    && chown -R 1000:1000 /data
 
-ENV SKILLS_DIR=/skills \
+ENV SKILLS_DIR=/skills/skills \
     AGENTURA_KNOWLEDGE_DIR=/data/.agentura \
     HOST=0.0.0.0 \
     PORT=8000 \
@@ -33,4 +36,4 @@ EXPOSE 8000
 
 USER agentura
 
-ENTRYPOINT ["agentura-server"]
+ENTRYPOINT ["/entrypoint.sh"]

@@ -81,6 +81,16 @@ def _dispatch(say, subcommand: str, args: str, full_text: str = "", user_id: str
 
 # ─── @mention handler (works without slash command setup) ──────────
 
+@app.middleware
+def log_request(body, next):
+    """Log every incoming Slack payload for debugging."""
+    ptype = body.get("type", "?")
+    event = body.get("event", {}) or {}
+    etype = event.get("type", "")
+    print(f"[debug:incoming] type={ptype} event={etype} subtype={event.get('subtype','')} channel_type={event.get('channel_type','')} text={str(event.get('text',''))[:50]}", flush=True)
+    return next()
+
+
 @app.event("app_mention")
 def handle_mention(event, say):
     """Handle @CortexMesh mentions in channels."""
