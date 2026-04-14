@@ -121,6 +121,14 @@ def handle_dm(event, say):
         subcommand, args = _parse_command(text)
         _dispatch(say, subcommand, args, full_text=text, user_id=user_id)
 
+    elif channel_type in ("channel", "group") and re.search(r"<@[A-Z0-9]+>", text):
+        # @mention in a public or private channel — route as a question
+        question = re.sub(r"<@[A-Z0-9]+>\s*", "", text).strip()
+        print(f"[mention] channel_type={channel_type} user={user_id} q={question[:80]}", flush=True)
+        if question:
+            subcommand, args = _parse_command(question)
+            _dispatch(say, subcommand, args, full_text=question, user_id=user_id)
+
     elif text.lower().startswith(("ask ", "ask:")):
         # Channel message starting with "ask " or "ask:" — route to code review bot
         question = re.sub(r"^ask[: ]+", "", text, flags=re.IGNORECASE).strip()
