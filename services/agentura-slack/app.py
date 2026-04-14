@@ -91,15 +91,56 @@ def log_request(body, next):
     return next()
 
 
+def _threaded_say(say, thread_ts: str | None):
+    """Wrap say() so all replies go into the same thread."""
+    if not thread_ts:
+        return say
+    def _say(*args, **kwargs):
+        kwargs.setdefault("thread_ts", thread_ts)
+        return say(*args, **kwargs)
+    return _say
+
+
+def _fetch_thread_context(client, channel: str, thread_ts: str, current_ts: str) -> str:
+    """Return the last few thread messages (excluding the triggering one) as context."""
+    try:
+        result = client.conversations_replies(channel=channel, ts=thread_ts, limit=20)
+        messages = result.get("messages", [])
+        # Exclude the current triggering message and bot messages
+        context = [
+            m.get("text", "")
+            for m in messages
+            if m.get("ts") != current_ts and not m.get("bot_id") and m.get("text")
+        ]
+        if context:
+            joined = "\n".join(f"  • {m}" for m in context[-8:])
+            print(f"[thread] fetched {len(context)} context messages", flush=True)
+            return f"\n\n[Thread context:\n{joined}\n]"
+    except Exception as e:
+        print(f"[thread] failed to fetch context: {e}", flush=True)
+    return ""
+
+
 @app.event("app_mention")
-def handle_mention(event, say):
-    """Handle @CortexMesh mentions in channels."""
+def handle_mention(event, say, client):
+    """Handle @CortexMesh mentions in channels and threads."""
     text = event.get("text", "")
     user_id = event.get("user", "")
+    channel = event.get("channel", "")
+    thread_ts = event.get("thread_ts")   # set only when mention is inside a thread
+    current_ts = event.get("ts", "")
+
     subcommand, args = _parse_command(text)
-    # Strip the bot mention to get the clean question text
     clean_text = re.sub(r"<@[A-Z0-9]+>\s*", "", text).strip()
-    _dispatch(say, subcommand, args, full_text=clean_text, user_id=user_id)
+
+    # If in a thread, include prior thread messages as context
+    if thread_ts:
+        context = _fetch_thread_context(client, channel, thread_ts, current_ts)
+        clean_text = clean_text + context
+
+    # Wrap say() so all responses go back into the same thread
+    threaded = _threaded_say(say, thread_ts)
+    _dispatch(threaded, subcommand, args, full_text=clean_text, user_id=user_id)
 
 
 @app.event("message")
@@ -136,14 +177,22 @@ def handle_dm(event, say):
 
 # ─── Slash command handler (if /agentura is configured) ────────────
 
-@app.command("/agentura")
-@app.command("/openclaw")
-def handle_command(ack, command, say):
+def _handle_command_impl(ack, command, say):
     ack()
     text = command.get("text", "").strip()
     user_id = command.get("user_id", "")
     subcommand, args = _parse_command(text)
     _dispatch(say, subcommand, args, full_text=text, user_id=user_id)
+
+
+@app.command("/agentura")
+def handle_command(ack, command, say):
+    _handle_command_impl(ack, command, say)
+
+
+@app.command("/codeinsight")
+def handle_codeinsight(ack, command, say):
+    _handle_command_impl(ack, command, say)
 
 
 # ─── Command implementations ──────────────────────────────────────
@@ -462,11 +511,15 @@ def _handle_question(say, question: str, user_id: str = ""):
                 "text": f"{'✅' if success else '❌'} *Code Review Bot* {role_icon} _{role_label}_ — {latency_str} | `${result.get('cost_usd', 0):.4f}`",
             },
         }
+        question_block = {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*Question:* {question[:500]}"},
+        }
         body = {
             "type": "section",
             "text": {"type": "mrkdwn", "text": raw[:3000]},
         }
-        say(text=raw[:200], blocks=[header, {"type": "divider"}, body])
+        say(text=raw[:200], blocks=[header, question_block, {"type": "divider"}, body])
     except httpx.HTTPStatusError as e:
         print(f"[question] HTTP error: {e.response.status_code} {e.response.text[:200]}", flush=True)
         say(f":x: Error: {e.response.status_code} — {e.response.text[:300]}")
