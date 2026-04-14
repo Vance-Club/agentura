@@ -142,7 +142,6 @@ def build_and_save(repo_dir: str, codebase: str, out_dir: str) -> str:
     t0 = time.time()
     graph = build_graph(repo_dir, codebase)
     elapsed = time.time() - t0
-    size_kb = os.path.getsize(out_path) // 1024 if os.path.exists(out_path) else 0
     print(
         f"[graph:build] DONE codebase={codebase} files={graph['meta']['file_count']} "
         f"classes={len(graph['class_index'])} elapsed={elapsed:.1f}s output={out_path}",
@@ -150,7 +149,8 @@ def build_and_save(repo_dir: str, codebase: str, out_dir: str) -> str:
     )
     with open(out_path, "w") as f:
         json.dump(graph, f, separators=(",", ":"))
-    print(f"[graph:build] SAVED {out_path} ({os.path.getsize(out_path)//1024}KB)", flush=True)
+    size_kb = os.path.getsize(out_path) // 1024
+    print(f"[graph:build] SAVED {out_path} ({size_kb}KB)", flush=True)
     return out_path
 
 

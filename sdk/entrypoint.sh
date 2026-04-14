@@ -31,10 +31,10 @@ clone_or_pull() {
             git -C "$dest" reset --hard FETCH_HEAD
         fi
     else
-        local branch_arg=""
-        [ -n "$branch" ] && branch_arg="--branch $branch"
+        local clone_args=(git clone "--depth=$depth")
+        [ -n "$branch" ] && clone_args+=(--branch "$branch")
         echo "[entrypoint] Cloning $repo_url -> $dest (depth=$depth branch=${branch:-default})"
-        git clone --depth="$depth" $branch_arg "$repo_url" "$dest"
+        "${clone_args[@]}" "$repo_url" "$dest"
     fi
 }
 
