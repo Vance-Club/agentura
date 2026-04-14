@@ -110,14 +110,53 @@ SANDBOX_TOOLS = [
         },
     },
     {
+        "name": "query_code_graph",
+        "description": (
+            "Query the pre-built codebase knowledge graph. PREFER THIS over git_codebase "
+            "for broad questions — it returns structured relationship data in one call "
+            "instead of many git round-trips, saving significant context tokens.\n\n"
+            "Modes:\n"
+            "  find    – locate files/classes by name or keyword\n"
+            "  callers – find every file that imports/references a class\n"
+            "  deps    – show what a file/class depends on\n"
+            "  module  – list all files in a module or directory\n"
+            "  summary – graph stats (file count, build time)\n\n"
+            "Examples:\n"
+            "  {mode:'find',    term:'RemittanceViewModel'}   → files containing this class\n"
+            "  {mode:'callers', term:'RemittanceViewModel'}   → files that import it\n"
+            "  {mode:'deps',    term:'RemittanceViewModel'}   → what it depends on\n"
+            "  {mode:'module',  term:'data-layer'}            → all files in that module\n"
+            "Fall back to git_codebase for authorship, blame, and recent-change queries."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": ["find", "callers", "deps", "module", "summary"],
+                    "description": "Query mode",
+                },
+                "term": {
+                    "type": "string",
+                    "description": "Class name, file path fragment, or keyword to query",
+                },
+                "codebase": {
+                    "type": "string",
+                    "description": "Which codebase: 'android' (default) or 'ios'",
+                },
+            },
+            "required": ["mode", "term"],
+        },
+    },
+    {
         "name": "git_codebase",
         "description": (
-            "Run a read-only git command against a mounted codebase. Supports shell pipes. "
-            "Supported git sub-commands: log, blame, show, diff, shortlog, ls-files, grep. "
-            "Use this to answer 'who wrote X', 'what changed in X', 'find files matching X'. "
-            "The codebase is already present — do NOT use clone_repo. "
+            "Run a read-only git command against a mounted codebase. "
+            "Use for: authorship (git log/blame), recent changes (git log), "
+            "exact file content (git show). "
+            "For finding files and class relationships, prefer query_code_graph — it's faster. "
+            "Supported sub-commands: log, blame, show, diff, shortlog, ls-files, grep. "
             "Android source files live under app/src/main/java/ (not kotlin/). "
-            "To find a file: 'git ls-files | grep FileName'. "
             "To get author: 'git log --follow -1 --format=\"%an\" -- <path>'. "
             "To blame a file: 'git blame <path>'. "
             "To see contributors: 'git shortlog -sne --all | head -20'."
@@ -408,11 +447,24 @@ def _execute_tool(
         return _create_branch(sandbox, tool_input)
     if tool_name == "create_pr":
         return _create_pr(sandbox, tool_input)
+    if tool_name == "query_code_graph":
+        return _query_code_graph(tool_input)
     if tool_name == "git_codebase":
         return _git_codebase(tool_input)
     if tool_name == "task_complete":
         return json.dumps(tool_input)
     return f"Unknown tool: {tool_name}"
+
+
+def _query_code_graph(params: dict) -> str:
+    """Dispatch to the graph query engine."""
+    from agentura_sdk.runner.graph_builder import query as graph_query
+    mode = params.get("mode", "find")
+    term = params.get("term", "").strip()
+    codebase = params.get("codebase", "android").lower()
+    if not term and mode != "summary":
+        return "[error] query_code_graph requires 'term'"
+    return graph_query(codebase, mode, term)
 
 
 _CODEBASE_ROOTS = {
@@ -446,28 +498,38 @@ def _git_codebase(params: dict) -> str:
     if not command:
         return "[error] empty command"
 
-    # Strip leading 'git' to check the subcommand
-    try:
-        tokens = shlex.split(command.split("|")[0].strip())  # check first segment before any pipe
-    except ValueError:
-        tokens = command.split()
+    # Parse the full command — reject anything containing shell operators
+    # (pipes, semicolons, redirects, subshells) before token validation.
+    if any(op in command for op in ("|", ";", "&&", "||", ">", "<", "`", "$(")):
+        return "[error] shell operators are not allowed in git commands"
 
-    first_tokens = tokens[1:] if tokens and tokens[0] == "git" else tokens
-    subcmd = first_tokens[0] if first_tokens else ""
-    if subcmd and subcmd not in _GIT_ALLOWED_SUBCMDS:
+    try:
+        tokens = shlex.split(command)
+    except ValueError as exc:
+        return f"[error] could not parse command: {exc}"
+
+    # Strip leading 'git' and validate the subcommand
+    args = tokens[1:] if tokens and tokens[0] == "git" else tokens
+    subcmd = args[0] if args else ""
+    if not subcmd or subcmd not in _GIT_ALLOWED_SUBCMDS:
         return (
             f"[error] git sub-command '{subcmd}' is not allowed. "
             f"Allowed: {', '.join(sorted(_GIT_ALLOWED_SUBCMDS))}"
         )
 
-    # Prepend 'cd <repo> &&' so pipes and relative paths work correctly
-    shell_cmd = f"cd {shlex.quote(repo_dir)} && {command}"
-
+    # Run without shell=True — no injection possible
+    git_argv = ["git"] + args
     try:
-        result = sp.run(shell_cmd, shell=True, capture_output=True, text=True, timeout=30)
+        result = sp.run(
+            git_argv,
+            cwd=repo_dir,
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
         output = (result.stdout or "") + (result.stderr or "")
         output = output.strip() or "(no output)"
-        # Truncate very long output to avoid flooding the context
         if len(output) > 8000:
             output = output[:8000] + "\n... [truncated]"
         return output

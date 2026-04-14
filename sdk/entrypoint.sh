@@ -42,4 +42,34 @@ clone_or_pull "$SKILLS_REPO"         "/skills"                 1   "${SKILLS_BRA
 clone_or_pull "$VANCE_ANDROID_REPO"  "/codebase/vance-android" 500
 clone_or_pull "$VANCE_IOS_REPO"      "/codebase/vance-ios"     500
 
+# Build code knowledge graphs in the background (non-blocking).
+# Graphs are stored in the persistent volume so they survive restarts.
+# The executor's query_code_graph tool will serve "[graph] still building"
+# until graph.json appears, then switch to live queries automatically.
+build_graph_if_stale() {
+    local codebase="$1"
+    local repo_dir="$2"
+    local graph_file="/data/.agentura/graphs/${codebase}/graph.json"
+
+    [ -d "$repo_dir/.git" ] || return
+
+    # Rebuild if graph is missing or older than the most recent git commit
+    local repo_mtime
+    repo_mtime=$(stat -c %Y "$repo_dir/.git/FETCH_HEAD" 2>/dev/null || echo 0)
+    local graph_mtime
+    graph_mtime=$(stat -c %Y "$graph_file" 2>/dev/null || echo 0)
+
+    if [ "$graph_mtime" -lt "$repo_mtime" ]; then
+        echo "[entrypoint] Building ${codebase} code graph (background)..."
+        mkdir -p "/data/.agentura/graphs/${codebase}"
+        python3 -m agentura_sdk.runner.graph_builder "$codebase" \
+            >> "/data/.agentura/graphs/${codebase}/build.log" 2>&1 &
+    else
+        echo "[entrypoint] ${codebase} code graph is up to date."
+    fi
+}
+
+build_graph_if_stale "android" "/codebase/vance-android"
+build_graph_if_stale "ios"     "/codebase/vance-ios"
+
 exec agentura-server

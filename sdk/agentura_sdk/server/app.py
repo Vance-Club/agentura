@@ -248,18 +248,27 @@ def _count_guardrails(domain_dir: Path) -> int:
     return len(re.findall(r"##\s+GRD-\d+", grd_file.read_text()))
 
 
+_ALLOWED_ROLES = {"developer", "product-manager", "product_manager"}
+
+
 def _load_role_prompt(skill_root: Path, input_data: dict) -> str:
     """Load a role-specific prompt from prompts/<role>.md if it exists.
 
-    Normalises input_data['role'] values like 'product_manager' → 'product-manager'
-    and 'developer' → 'developer', then returns the file contents or an empty string.
+    Only roles in _ALLOWED_ROLES are accepted — arbitrary user input is
+    never interpolated into the filesystem path.
     """
-    role_raw = (input_data or {}).get("role", "")
+    role_raw = str((input_data or {}).get("role", "")).strip()
     if not role_raw:
         return ""
     # Normalise: underscores → hyphens, lowercase
-    role_slug = str(role_raw).lower().replace("_", "-")
-    prompt_file = skill_root / "prompts" / f"{role_slug}.md"
+    role_slug = role_raw.lower().replace("_", "-")
+    if role_slug not in _ALLOWED_ROLES:
+        return ""
+    # Resolve and confirm the final path stays inside prompts/
+    prompts_dir = (skill_root / "prompts").resolve()
+    prompt_file = (prompts_dir / f"{role_slug}.md").resolve()
+    if not str(prompt_file).startswith(str(prompts_dir)):
+        return ""
     if prompt_file.exists():
         return prompt_file.read_text().strip()
     return ""
