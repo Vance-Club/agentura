@@ -177,22 +177,37 @@ def handle_dm(event, say):
 
 # ─── Slash command handler (if /agentura is configured) ────────────
 
-def _handle_command_impl(ack, command, say):
+def _command_ack(ack):
+    """Acknowledge slash commands immediately to beat Slack's 3-second timeout."""
     ack()
+
+
+def _command_lazy(command, say):
+    """Heavy work runs in a background thread after ack is already sent."""
     text = command.get("text", "").strip()
     user_id = command.get("user_id", "")
     subcommand, args = _parse_command(text)
     _dispatch(say, subcommand, args, full_text=text, user_id=user_id)
 
 
-@app.command("/agentura")
-def handle_command(ack, command, say):
-    _handle_command_impl(ack, command, say)
+def _command_silent_lazy(command, respond):
+    """Same as _command_lazy but replies are ephemeral."""
+    text = command.get("text", "").strip()
+    user_id = command.get("user_id", "")
+    subcommand, args = _parse_command(text)
+
+    def ephemeral_say(*args, **kwargs):
+        if args:
+            kwargs["text"] = args[0]
+        kwargs["response_type"] = "ephemeral"
+        respond(**kwargs)
+
+    _dispatch(ephemeral_say, subcommand, args, full_text=text, user_id=user_id)
 
 
-@app.command("/codeinsight")
-def handle_codeinsight(ack, command, say):
-    _handle_command_impl(ack, command, say)
+app.command("/agentura")(ack=_command_ack, lazy=[_command_lazy])
+app.command("/codeinsight")(ack=_command_ack, lazy=[_command_lazy])
+app.command("/codeinsightsilent")(ack=_command_ack, lazy=[_command_silent_lazy])
 
 
 # ─── Command implementations ──────────────────────────────────────

@@ -401,9 +401,11 @@ def _load_graphify_for_query(codebase: str, mode: str, term: str) -> str | None:
     else:
         cmd = _GRAPHIFY_CMD + ["query", term, "--graph", graph_file, "--budget", "1500"]
 
-    print(f"[graph:graphify] query CMD={' '.join(cmd)}", flush=True)
+    # Run from the repo root so graphify path/query find graphify-out/ by default
+    repo_dir = os.path.dirname(os.path.dirname(graph_file))
+    print(f"[graph:graphify] query CMD={' '.join(cmd)} cwd={repo_dir}", flush=True)
     try:
-        result = sp.run(cmd, capture_output=True, text=True, timeout=30)
+        result = sp.run(cmd, capture_output=True, text=True, timeout=30, cwd=repo_dir)
         output = (result.stdout or "").strip()
         if result.returncode != 0:
             print(f"[graph:graphify] query FAILED rc={result.returncode} stderr={result.stderr[:200]}", flush=True)
