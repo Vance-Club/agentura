@@ -319,6 +319,34 @@ triggers:
             extract:
               input: "{question}"
             description: "D0 activation, signup funnel, referral quality"
+      - name: codelens
+        signing_secret: "${SLACK_CODELENS_SIGNING_SECRET}"
+        bot_token: "${SLACK_CODELENS_BOT_TOKEN}"
+        app_token: "${SLACK_CODELENS_APP_TOKEN}"
+        mode: "socket"
+        domain_scope: "dev"
+        allowed_skills: ["code-review-bot", "ios-code-review-bot"]
+        ack_reaction: "eyes"
+        typing_reaction: "hourglass_flowing_sand"
+        dm:
+          policy: "open"
+        events:
+          message: true
+          app_mention: true
+          reaction: false
+        commands:
+          - pattern: "ask {question}"
+            skill: "code-review-bot"
+            extract: {"question": "{question}", "role": "developer"}
+            description: "Ask a question about the Android codebase"
+          - pattern: "ios {question}"
+            skill: "ios-code-review-bot"
+            extract: {"question": "{question}", "role": "developer"}
+            description: "Ask a question about the iOS codebase"
+          - pattern: "pm {question}"
+            skill: "code-review-bot"
+            extract: {"question": "{question}", "role": "product_manager"}
+            description: "Ask a PM-friendly question about the codebase"
       - name: ge
         signing_secret: "${SLACK_GE_SIGNING_SECRET}"
         bot_token: "${SLACK_GE_BOT_TOKEN}"
