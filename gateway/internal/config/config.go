@@ -94,10 +94,13 @@ type SlackAppConfig struct {
 
 // WatchBotConfig routes messages from a specific bot to a skill.
 type WatchBotConfig struct {
-	BotID       string `yaml:"bot_id"`       // Slack bot ID (B...)
-	Skill       string `yaml:"skill"`        // skill to invoke
-	Channel     string `yaml:"channel"`      // only trigger in this channel (optional)
-	Description string `yaml:"description"`
+	BotID        string   `yaml:"bot_id"`        // Slack bot ID (B...)
+	Skill        string   `yaml:"skill"`         // skill to invoke
+	Channel      string   `yaml:"channel"`       // only trigger in this channel (optional)
+	Description  string   `yaml:"description"`
+	PassRawText  bool     `yaml:"pass_raw_text"`  // send full message text + attachments instead of extracting order IDs (ops-genie)
+	SkipMonitors []string `yaml:"skip_monitors"`  // monitor name patterns to skip enrichment (noise filter)
+	OutputChannel string  `yaml:"output_channel"` // post results to this channel instead of source channel (ops-genie-pilot)
 }
 
 // SlackCommandAlias maps a natural language pattern to a skill execution.
