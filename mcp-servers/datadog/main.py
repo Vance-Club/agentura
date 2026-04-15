@@ -133,6 +133,68 @@ TOOLS = [
             "required": ["service_name"],
         },
     },
+    {
+        "name": "query_pod_health",
+        "description": "Get K8s pod health metrics for a service: CPU %, memory %, pod count, restart count. Uses parameterized queries — service_name only.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "service_name": {
+                    "type": "string",
+                    "description": "Service name (maps to kube_deployment tag in Datadog)",
+                },
+                "period": {
+                    "type": "string",
+                    "description": "Time window: '15m', '1h', '4h' (default: '15m')",
+                    "default": "15m",
+                },
+            },
+            "required": ["service_name"],
+        },
+    },
+    {
+        "name": "query_top_failing_endpoints",
+        "description": "Get top failing endpoints (resources) for a service ranked by error rate. Shows WHICH API path is broken.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "service_name": {
+                    "type": "string",
+                    "description": "Datadog APM service name",
+                },
+                "period": {
+                    "type": "string",
+                    "description": "Time window (default: '15m')",
+                    "default": "15m",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max endpoints to return (default: 5)",
+                    "default": 5,
+                },
+            },
+            "required": ["service_name"],
+        },
+    },
+    {
+        "name": "query_dependency_health",
+        "description": "Get health metrics for each dependency of a service (per-edge: error rate, latency, call rate). Replaces get_service_dependencies with actual per-edge metrics.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "service_name": {
+                    "type": "string",
+                    "description": "Datadog APM service name",
+                },
+                "period": {
+                    "type": "string",
+                    "description": "Time window (default: '15m')",
+                    "default": "15m",
+                },
+            },
+            "required": ["service_name"],
+        },
+    },
 ]
 
 
@@ -156,6 +218,9 @@ async def call_tool(req: ToolCallRequest):
         "get_service_dependencies": _get_service_dependencies,
         "get_deployment_events": _get_deployment_events,
         "query_error_rate": _query_error_rate,
+        "query_pod_health": _query_pod_health,
+        "query_top_failing_endpoints": _query_top_failing_endpoints,
+        "query_dependency_health": _query_dependency_health,
     }
     handler = handlers.get(req.name)
     if not handler:
@@ -354,10 +419,16 @@ async def _query_error_rate(args: dict) -> str:
 
     tags = f"env:{env},service:{service}"
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-        hits = await _query_metric(client, f"sum:trace.http.request.hits{{{tags}}}.as_rate()")
-        errors_5xx = await _query_metric(client, f"sum:trace.http.request.hits.by_http_status{{{tags},http.status_class:5xx}}.as_rate()")
-        p95_s = await _query_metric(client, f"p95:trace.http.request{{{tags}}}")
-        apdex = await _query_metric(client, f"avg:trace.http.request.apdex{{{tags}}}")
+        # Try trace.servlet.request first (Spring Boot), fallback to trace.http.request
+        hits = await _query_metric(client, f"sum:trace.servlet.request.hits{{{tags}}}.as_rate()")
+        if hits == 0:
+            hits = await _query_metric(client, f"sum:trace.http.request.hits{{{tags}}}.as_rate()")
+            span = "http.request"
+        else:
+            span = "servlet.request"
+        errors_5xx = await _query_metric(client, f"sum:trace.{span}.errors{{{tags}}}.as_rate()")
+        p95_s = await _query_metric(client, f"p95:trace.{span}{{{tags}}}")
+        apdex = await _query_metric(client, f"avg:trace.{span}.apdex{{{tags}}}")
 
     error_pct = (errors_5xx / hits * 100) if hits > 0 else 0
 
@@ -398,3 +469,257 @@ def _extract_root_cause(attrs: dict) -> str:
         return postmortem.get("analysis", "")[:500]
     # Fallback to description
     return (attrs.get("customer_impact_scope", "") or "")[:500]
+
+
+def _period_to_seconds(period: str) -> int:
+    return {"15m": 900, "1h": 3600, "4h": 14400, "1d": 86400, "7d": 604800}.get(period, 900)
+
+
+async def _query_single_metric(client: httpx.AsyncClient, query: str, start: int, end: int) -> float | None:
+    """Query a single Datadog metric, return latest value or None."""
+    resp = await client.get(
+        f"{DD_BASE}/api/v1/query",
+        headers=_headers(),
+        params={"from": start, "to": end, "query": query},
+    )
+    if resp.status_code != 200:
+        return None
+    series = resp.json().get("series", [])
+    if series and series[0].get("pointlist"):
+        val = series[0]["pointlist"][-1][1]
+        return val if val is not None else None
+    return None
+
+
+async def _query_grouped_metric(client: httpx.AsyncClient, query: str, start: int, end: int) -> list[dict]:
+    """Query a Datadog metric with group-by, return list of {scope, value}."""
+    resp = await client.get(
+        f"{DD_BASE}/api/v1/query",
+        headers=_headers(),
+        params={"from": start, "to": end, "query": query},
+    )
+    if resp.status_code != 200:
+        return []
+    series = resp.json().get("series", [])
+    results = []
+    for s in series:
+        pts = s.get("pointlist", [])
+        val = pts[-1][1] if pts and pts[-1][1] is not None else 0
+        results.append({"scope": s.get("scope", ""), "value": val})
+    return results
+
+
+# --- Ops Genie Tools ---
+
+
+async def _query_pod_health(args: dict) -> str:
+    """Get K8s pod health for a service. Parameterized — LLM provides service name only."""
+    service = args.get("service_name", "")
+    period = args.get("period", "15m")
+    seconds = _period_to_seconds(period)
+    end = int(time.time())
+    start = end - seconds
+
+    # Map service name to likely k8s deployment name (strip -service suffix)
+    deploy = service.replace("-service", "")
+
+    metrics = {
+        "cpu_pct": f"avg:kubernetes.cpu.usage.total{{kube_deployment:{deploy}}}",
+        "memory_pct": f"avg:kubernetes.memory.usage_pct{{kube_deployment:{deploy}}}",
+        "pods_running": f"sum:kubernetes.pods.running{{kube_deployment:{deploy}}}",
+        "restarts": f"sum:kubernetes.containers.restarts{{kube_deployment:{deploy}}}",
+    }
+
+    result = {"service": service, "deployment": deploy, "period": period}
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        for key, query in metrics.items():
+            val = await _query_single_metric(client, query, start, end)
+            result[key] = round(val, 2) if val is not None else None
+
+    # Determine health status
+    cpu = result.get("cpu_pct")
+    restarts = result.get("restarts")
+    if restarts and restarts > 0:
+        result["health"] = "degraded"
+        result["note"] = f"{int(restarts)} container restarts in {period}"
+    elif cpu and cpu > 90:
+        result["health"] = "critical"
+        result["note"] = "CPU saturation"
+    elif cpu and cpu > 70:
+        result["health"] = "warning"
+    else:
+        result["health"] = "healthy"
+
+    return json.dumps(result, indent=2)
+
+
+async def _query_top_failing_endpoints(args: dict) -> str:
+    """Get top failing endpoints for a service. Parameterized — no raw QL from LLM."""
+    service = args.get("service_name", "")
+    period = args.get("period", "15m")
+    limit = args.get("limit", 5)
+    seconds = _period_to_seconds(period)
+    end = int(time.time())
+    start = end - seconds
+
+    tags = f"env:prod,service:{service}"
+
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        # Try servlet.request first (Spring Boot), fallback to http.request
+        errors = await _query_grouped_metric(
+            client,
+            f"sum:trace.servlet.request.errors{{{tags}}} by {{resource_name}}.as_rate()",
+            start, end,
+        )
+        if not errors:
+            errors = await _query_grouped_metric(
+                client,
+                f"sum:trace.http.request.errors{{{tags}}} by {{resource_name}}.as_rate()",
+                start, end,
+            )
+
+        hits = await _query_grouped_metric(
+            client,
+            f"sum:trace.servlet.request.hits{{{tags}}} by {{resource_name}}.as_rate()",
+            start, end,
+        )
+        if not hits:
+            hits = await _query_grouped_metric(
+                client,
+                f"sum:trace.http.request.hits{{{tags}}} by {{resource_name}}.as_rate()",
+                start, end,
+            )
+
+    # Build per-endpoint stats
+    hits_by_resource = {}
+    for h in hits:
+        # scope format: "env:prod,resource_name:POST /v1/foo,service:bar"
+        parts = dict(p.split(":", 1) for p in h["scope"].split(",") if ":" in p)
+        resource = parts.get("resource_name", "unknown")
+        hits_by_resource[resource] = h["value"]
+
+    endpoints = []
+    for e in errors:
+        parts = dict(p.split(":", 1) for p in e["scope"].split(",") if ":" in p)
+        resource = parts.get("resource_name", "unknown")
+        err_rate = e["value"]
+        hit_rate = hits_by_resource.get(resource, 0)
+        error_pct = (err_rate / hit_rate * 100) if hit_rate > 0 else 0
+        endpoints.append({
+            "resource": resource,
+            "errors_per_sec": round(err_rate, 3),
+            "hits_per_sec": round(hit_rate, 1),
+            "error_rate_pct": round(error_pct, 2),
+        })
+
+    # Sort by error rate descending, take top N
+    endpoints.sort(key=lambda x: -x["error_rate_pct"])
+    endpoints = endpoints[:limit]
+
+    # Determine if errors are isolated to one endpoint
+    isolated_to = None
+    if endpoints and endpoints[0]["error_rate_pct"] > 1:
+        if len(endpoints) < 2 or endpoints[1]["error_rate_pct"] < 0.5:
+            isolated_to = endpoints[0]["resource"]
+
+    result = {
+        "service": service,
+        "period": period,
+        "endpoints": endpoints,
+        "isolated_to": isolated_to,
+    }
+    return json.dumps(result, indent=2)
+
+
+async def _query_dependency_health(args: dict) -> str:
+    """Get per-edge dependency health. Replaces broken get_service_dependencies."""
+    service = args.get("service_name", "")
+    period = args.get("period", "15m")
+    seconds = _period_to_seconds(period)
+    end = int(time.time())
+    start = end - seconds
+
+    tags = f"env:prod,service:{service}"
+
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        # Get calls per dependency via peer.service tag
+        # Try servlet first, fallback to http
+        dep_hits = await _query_grouped_metric(
+            client,
+            f"sum:trace.servlet.request.hits{{{tags}}} by {{peer.service}}.as_rate()",
+            start, end,
+        )
+        if not dep_hits:
+            dep_hits = await _query_grouped_metric(
+                client,
+                f"sum:trace.http.request.hits{{{tags}}} by {{peer.service}}.as_rate()",
+                start, end,
+            )
+
+        dep_errors = await _query_grouped_metric(
+            client,
+            f"sum:trace.servlet.request.errors{{{tags}}} by {{peer.service}}.as_rate()",
+            start, end,
+        )
+        if not dep_errors:
+            dep_errors = await _query_grouped_metric(
+                client,
+                f"sum:trace.http.request.errors{{{tags}}} by {{peer.service}}.as_rate()",
+                start, end,
+            )
+
+        dep_latency = await _query_grouped_metric(
+            client,
+            f"p95:trace.servlet.request{{{tags}}} by {{peer.service}}",
+            start, end,
+        )
+        if not dep_latency:
+            dep_latency = await _query_grouped_metric(
+                client,
+                f"p95:trace.http.request{{{tags}}} by {{peer.service}}",
+                start, end,
+            )
+
+    def _extract_peer(scope: str) -> str:
+        parts = dict(p.split(":", 1) for p in scope.split(",") if ":" in p)
+        return parts.get("peer.service", "unknown")
+
+    # Merge into per-dependency records
+    deps = {}
+    for h in dep_hits:
+        peer = _extract_peer(h["scope"])
+        if peer == "N/A" or not peer:
+            continue
+        deps.setdefault(peer, {})["calls_per_sec"] = round(h["value"], 1)
+
+    for e in dep_errors:
+        peer = _extract_peer(e["scope"])
+        if peer in deps:
+            deps[peer]["errors_per_sec"] = round(e["value"], 3)
+
+    for l in dep_latency:
+        peer = _extract_peer(l["scope"])
+        if peer in deps:
+            deps[peer]["p95_ms"] = round(l["value"] * 1000) if l["value"] else None
+
+    dependencies = []
+    for name, metrics in deps.items():
+        calls = metrics.get("calls_per_sec", 0)
+        errs = metrics.get("errors_per_sec", 0)
+        error_pct = (errs / calls * 100) if calls > 0 else 0
+        health = "healthy" if error_pct < 1 else "degraded" if error_pct < 5 else "critical"
+        dependencies.append({
+            "name": name,
+            "calls_per_sec": calls,
+            "error_rate_pct": round(error_pct, 2),
+            "p95_ms": metrics.get("p95_ms"),
+            "health": health,
+        })
+
+    dependencies.sort(key=lambda x: -x.get("error_rate_pct", 0))
+
+    return json.dumps({
+        "service": service,
+        "period": period,
+        "dependencies": dependencies,
+    }, indent=2)
