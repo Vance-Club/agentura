@@ -8,7 +8,6 @@ import (
 	"os"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/slack-go/slack"
@@ -21,19 +20,14 @@ import (
 
 // SlackSocketManager manages Socket Mode connections for all configured apps.
 type SlackSocketManager struct {
-	executor    *executor.Client
-	apps        []config.SlackAppConfig
-	clients     []*socketmode.Client
-	wbLimiter   *watchBotLimiter // rate limiter for watch_bot dispatches (SEC-008)
+	executor *executor.Client
+	apps     []config.SlackAppConfig
+	clients  []*socketmode.Client
 }
 
 // NewSlackSocketManager creates the manager (does not connect yet).
 func NewSlackSocketManager(exec *executor.Client, cfg config.SlackConfig) *SlackSocketManager {
-	return &SlackSocketManager{
-		executor:  exec,
-		apps:      cfg.Apps,
-		wbLimiter: newWatchBotLimiter(3, 30*time.Minute),
-	}
+	return &SlackSocketManager{executor: exec, apps: cfg.Apps}
 }
 
 // Start launches a goroutine for each app configured with mode: "socket".
@@ -116,11 +110,8 @@ func (m *SlackSocketManager) handleEventsAPI(app *config.SlackAppConfig, evtAPI 
 		if ev.BotID != "" {
 			if wb := matchWatchBot(app, ev.BotID, ev.Channel); wb != nil {
 				if wb.PassRawText {
-					// Ops-genie path: rate limit check BEFORE goroutine (Professor #2)
-					if !m.wbLimiter.Allow(wb.Skill, ev.Channel) {
-						slog.Info("watch_bot: rate limited", "app", app.Name, "skill", wb.Skill, "channel", ev.Channel)
-						return
-					}
+					// Ops-genie path: full-text pass-through (Datadog alerts)
+					// Dedup handled in-skill via find_active_incident (not a blunt rate limit)
 					go m.handleOpsGenieWatchBot(app, wb, ev)
 				} else {
 					// ECM path: existing behavior, untouched
@@ -936,49 +927,6 @@ func extractOrderIDs(text string) []string {
 		}
 	}
 	return unique
-}
-
-// ---------- Ops Genie: watch_bot rate limiter (SEC-008) ----------
-
-type watchBotLimiter struct {
-	mu       sync.Mutex
-	windows  map[string][]time.Time
-	maxCount int
-	window   time.Duration
-}
-
-func newWatchBotLimiter(maxCount int, window time.Duration) *watchBotLimiter {
-	return &watchBotLimiter{
-		windows:  make(map[string][]time.Time),
-		maxCount: maxCount,
-		window:   window,
-	}
-}
-
-func (l *watchBotLimiter) Allow(skill, channel string) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	key := skill + ":" + channel
-	now := time.Now()
-	cutoff := now.Add(-l.window)
-
-	// Remove expired entries
-	timestamps := l.windows[key]
-	valid := timestamps[:0]
-	for _, t := range timestamps {
-		if t.After(cutoff) {
-			valid = append(valid, t)
-		}
-	}
-
-	if len(valid) >= l.maxCount {
-		l.windows[key] = valid
-		return false
-	}
-
-	l.windows[key] = append(valid, now)
-	return true
 }
 
 // ---------- Ops Genie: watch_bot handler (new path, does not touch ECM) ----------
