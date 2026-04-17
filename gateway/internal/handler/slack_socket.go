@@ -201,6 +201,21 @@ func (m *SlackSocketManager) handleSocketMessage(app *config.SlackAppConfig, cha
 		}
 	}
 
+	// Channel ACL: enforce mention_only / disabled for non-DM channels.
+	// Watch bots bypass this check (handled in handleEventsAPI before this).
+	if !isDM(channelType) {
+		if acl := findChannelACL(app, channel); acl != nil {
+			if acl.Policy == "disabled" {
+				slog.Debug("slack socket: channel disabled by ACL", "app", app.Name, "channel", channel)
+				return
+			}
+			if acl.MentionOnly && !strings.HasPrefix(strings.TrimSpace(text), "<@") {
+				slog.Debug("slack socket: channel is mention_only, skipping plain message", "app", app.Name, "channel", channel)
+				return
+			}
+		}
+	}
+
 	// Strip bot mention prefix
 	cleanText := strings.TrimSpace(text)
 	if idx := strings.Index(cleanText, "> "); idx != -1 && strings.HasPrefix(cleanText, "<@") {
@@ -571,6 +586,17 @@ func (m *SlackSocketManager) isDMAllowed(app *config.SlackAppConfig, userID stri
 	default:
 		return true
 	}
+}
+
+// findChannelACL returns the channel ACL entry for the given channel ID, or nil
+// if no ACL is configured (i.e. the channel is unrestricted).
+func findChannelACL(app *config.SlackAppConfig, channelID string) *config.SlackChannelACL {
+	for i := range app.Channels {
+		if app.Channels[i].ID == channelID {
+			return &app.Channels[i]
+		}
+	}
+	return nil
 }
 
 func (m *SlackSocketManager) isEventEnabled(app *config.SlackAppConfig, eventType string) bool {
