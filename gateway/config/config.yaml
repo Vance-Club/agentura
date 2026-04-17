@@ -108,6 +108,10 @@ triggers:
         dm:
           policy: "open"
           allowlist: []
+        channels:
+          - id: "${OPS_TECH_CHANNEL_ID}"
+            name: "ops-tech-issues"
+            mention_only: true
         events:
           message: true
           app_mention: true
