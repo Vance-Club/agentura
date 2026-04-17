@@ -162,31 +162,43 @@ _GRAPH_CACHE: dict[str, dict] = {}
 _GRAPH_MTIME: dict[str, float] = {}
 
 
-def _load_graph(codebase: str) -> dict | None:
-    path = f"/data/.agentura/graphs/{codebase}/graph.json"
+def _branch_slug(branch: str) -> str:
+    """Filesystem-safe slug for branch names (e.g. 'release/1.5' → 'release__1.5')."""
+    return branch.replace("/", "__").replace(" ", "_")
+
+
+def _graph_path(codebase: str, branch: str | None) -> str:
+    if branch:
+        return f"/data/.agentura/graphs/{codebase}/branches/{_branch_slug(branch)}/graph.json"
+    return f"/data/.agentura/graphs/{codebase}/graph.json"
+
+
+def _load_graph(codebase: str, branch: str | None = None) -> dict | None:
+    path = _graph_path(codebase, branch)
+    cache_key = f"{codebase}:{branch}" if branch else codebase
     if not os.path.exists(path):
-        print(f"[graph:load] MISS codebase={codebase} path={path} (not found)", flush=True)
+        print(f"[graph:load] MISS key={cache_key} path={path} (not found)", flush=True)
         return None
     mtime = os.path.getmtime(path)
-    if _GRAPH_MTIME.get(codebase) != mtime:
+    if _GRAPH_MTIME.get(cache_key) != mtime:
         size_kb = os.path.getsize(path) // 1024
-        print(f"[graph:load] LOAD codebase={codebase} size={size_kb}KB path={path}", flush=True)
+        print(f"[graph:load] LOAD key={cache_key} size={size_kb}KB path={path}", flush=True)
         with open(path) as f:
-            _GRAPH_CACHE[codebase] = json.load(f)
-        _GRAPH_MTIME[codebase] = mtime
-        meta = _GRAPH_CACHE[codebase].get("meta", {})
+            _GRAPH_CACHE[cache_key] = json.load(f)
+        _GRAPH_MTIME[cache_key] = mtime
+        meta = _GRAPH_CACHE[cache_key].get("meta", {})
         print(
-            f"[graph:load] CACHED codebase={codebase} files={meta.get('file_count')} "
-            f"classes={len(_GRAPH_CACHE[codebase].get('class_index', {}))} "
+            f"[graph:load] CACHED key={cache_key} files={meta.get('file_count')} "
+            f"classes={len(_GRAPH_CACHE[cache_key].get('class_index', {}))} "
             f"built_at={meta.get('built_at')}",
             flush=True,
         )
     else:
-        print(f"[graph:load] HIT codebase={codebase} (serving from cache)", flush=True)
-    return _GRAPH_CACHE.get(codebase)
+        print(f"[graph:load] HIT key={cache_key} (serving from cache)", flush=True)
+    return _GRAPH_CACHE.get(cache_key)
 
 
-def query(codebase: str, mode: str, term: str, target: str = "") -> str:
+def query(codebase: str, mode: str, term: str, target: str = "", branch: str | None = None) -> str:
     """
     Query modes:
       find      – find files/classes matching term (name or keyword)
@@ -198,11 +210,12 @@ def query(codebase: str, mode: str, term: str, target: str = "") -> str:
     Tries graphify CLI first if installed (richer semantic queries),
     then falls back to the built-in index.
     """
-    graph_file = f"/data/.agentura/graphs/{codebase}/graph.json"
-    print(f"[graph:query] REQUEST codebase={codebase} mode={mode} term={term!r}", flush=True)
+    graph_file = _graph_path(codebase, branch)
+    print(f"[graph:query] REQUEST codebase={codebase} branch={branch} mode={mode} term={term!r}", flush=True)
 
-    # Try graphify CLI first for find/callers — richer semantic search
-    if mode in ("find", "callers") and os.path.exists(graph_file):
+    # graphify CLI only operates on the default-branch graph — skip it if a
+    # specific branch was requested, otherwise its results would be off-branch.
+    if branch is None and mode in ("find", "callers") and os.path.exists(graph_file):
         print(f"[graph:query] TRYING graphify CLI for mode={mode} term={term!r}", flush=True)
         graphify_result = _load_graphify_for_query(codebase, mode, term)
         if graphify_result:
@@ -210,8 +223,19 @@ def query(codebase: str, mode: str, term: str, target: str = "") -> str:
             return graphify_result
         print(f"[graph:query] graphify returned nothing — falling back to built-in index", flush=True)
 
-    graph = _load_graph(codebase)
+    graph = _load_graph(codebase, branch)
     if graph is None:
+        if branch:
+            return (
+                f"[graph] No prebuilt graph for branch '{branch}' in '{codebase}'.\n"
+                "RECOMMENDED FIRST MOVE for feature-branch questions: use git_codebase "
+                f"with this command to see what's new/changed on the branch vs main:\n"
+                f"  git diff --name-status origin/main..origin/{branch}\n"
+                "(or substitute 'develop' for 'main' if the repo uses develop). "
+                "This tells you which directories/files are NEW on this branch — focus "
+                "exploration there. Do NOT start by globbing file names; the diff is "
+                "the authoritative view of what the branch is actually about."
+            )
         return (
             f"[graph] No graph found for '{codebase}'. "
             "It may still be building at startup (check executor logs). "
