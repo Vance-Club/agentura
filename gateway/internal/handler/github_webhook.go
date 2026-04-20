@@ -26,6 +26,11 @@ import (
 
 const deliveryTTL = 10 * time.Minute
 
+// debounceWindow is the quiet period after the last push before a review is
+// triggered. Each new synchronize event resets the timer. 5 pushes in 10 min
+// = 1 review 15 min after the last push.
+const debounceWindow = 15 * time.Minute
+
 var (
 	githubWebhookRequestsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "agentura_github_webhook_requests_total",
@@ -40,10 +45,18 @@ var (
 	// recentPRReviews deduplicates PR reviews by repo+PR+headSHA to avoid posting
 	// duplicate reviews when GitHub sends multiple events for the same commit.
 	recentPRReviews sync.Map
+	// pendingReviews holds debounce timers for synchronize events, keyed by "repo#prNumber".
+	pendingReviews sync.Map
 )
 
+// pendingReview tracks a debounced synchronize event waiting to fire.
+type pendingReview struct {
+	timer *time.Timer
+	event domain.GitHubPREvent
+}
+
 func init() {
-	// Background cleanup of expired delivery IDs
+	// Background cleanup of expired delivery IDs and SHA dedup entries
 	go func() {
 		for {
 			time.Sleep(deliveryTTL)
@@ -55,7 +68,7 @@ func init() {
 				return true
 			})
 			recentPRReviews.Range(func(key, value any) bool {
-				if ts, ok := value.(time.Time); ok && now.Sub(ts) > prReviewCooldown {
+				if ts, ok := value.(time.Time); ok && now.Sub(ts) > debounceWindow {
 					recentPRReviews.Delete(key)
 				}
 				return true
@@ -72,47 +85,44 @@ func isDuplicateDelivery(deliveryID string) bool {
 	return loaded
 }
 
-// prReviewCooldown controls how often the same PR can be auto-reviewed.
-// 8 hours: review once on open, skip subsequent pushes for a full work session.
+// isDuplicatePRReview checks SHA-level dedup only. The debounce timer in
+// handlePullRequest replaces the old PR-level rate limit for synchronize events.
+// Fleet store check remains as a fallback safety net.
+//
 // Manual /shipwright review bypasses this (goes through issue_comment handler, not here).
-const prReviewCooldown = 8 * time.Hour
-
-// isDuplicatePRReview checks if we've dispatched a review for this repo+PR
-// within the cooldown window. Uses both in-memory cache AND persistent DB check
-// so the dedup survives gateway restarts.
 func isDuplicatePRReview(repo string, prNumber int, headSHA string) bool {
 	if repo == "" {
 		return false
 	}
-	key := fmt.Sprintf("%s#%d", repo, prNumber)
-	now := time.Now()
 
-	// In-memory fast path
-	if prev, loaded := recentPRReviews.Load(key); loaded {
-		if ts, ok := prev.(time.Time); ok && now.Sub(ts) < prReviewCooldown {
-			slog.Info("skipping duplicate PR review (in-memory cooldown)",
-				"repo", repo, "pr", prNumber, "sha", headSHA[:7],
-				"last_review_ago", now.Sub(ts).Round(time.Second))
-			return true
-		}
-	}
-
-	// Persistent check: query executor for recent fleet sessions for this PR.
-	// This survives gateway restarts — the in-memory check is just a fast path.
-	if isDuplicateInFleetStore(repo, prNumber) {
-		slog.Info("skipping duplicate PR review (fleet store cooldown)",
-			"repo", repo, "pr", prNumber, "sha", headSHA[:7])
-		recentPRReviews.Store(key, now) // warm the in-memory cache
+	// SHA-level dedup — same commit = same review, always skip.
+	shaKey := fmt.Sprintf("%s#%d#%s", repo, prNumber, headSHA)
+	if _, loaded := recentPRReviews.Load(shaKey); loaded {
+		slog.Info("skipping duplicate PR review (same SHA already reviewed)",
+			"repo", repo, "pr", prNumber, "sha", headSHA)
 		return true
 	}
 
-	recentPRReviews.Store(key, now)
+	// Fleet store: survives gateway restarts. Check if a review was dispatched
+	// very recently (e.g. another gateway instance handled the same event).
+	if isDuplicateInFleetStore(repo, prNumber) {
+		slog.Info("skipping PR review (fleet store dedup)",
+			"repo", repo, "pr", prNumber, "sha", headSHA)
+		return true
+	}
+
 	return false
 }
 
+// markSHAReviewed records that a review was dispatched for this SHA.
+func markSHAReviewed(repo string, prNumber int, headSHA string) {
+	shaKey := fmt.Sprintf("%s#%d#%s", repo, prNumber, headSHA)
+	recentPRReviews.Store(shaKey, time.Now())
+}
+
 // isDuplicateInFleetStore checks the executor's fleet store for a recent
-// session for this repo+PR. Returns true if a session was created in the
-// last 5 minutes (meaning a review is already in progress or just completed).
+// session for this repo+PR. Returns true if a session was created within
+// the PR rate-limit window (review in progress or just completed).
 func isDuplicateInFleetStore(repo string, prNumber int) bool {
 	// Query the executor's fleet sessions API
 	url := fmt.Sprintf("http://executor:8000/api/v1/fleet/sessions?repo=%s&pr=%d&limit=1",
@@ -152,7 +162,7 @@ func isDuplicateInFleetStore(repo string, prNumber int) bool {
 			return false
 		}
 	}
-	return time.Since(created) < prReviewCooldown
+	return time.Since(created) < debounceWindow
 }
 
 // GitHubTokenProvider generates fresh GitHub API tokens on demand.
@@ -350,21 +360,57 @@ func (h *GitHubWebhookHandler) handlePullRequest(w http.ResponseWriter, body []b
 		return
 	}
 
-	// Dedup: skip if we've already dispatched a review for this repo+PR+SHA
+	// SHA-level dedup: same commit = same review, always skip.
 	if isDuplicatePRReview(prEvent.Repo, prEvent.PRNumber, prEvent.HeadSHA) {
 		githubWebhookRequestsTotal.WithLabelValues("pull_request", payload.Action, "duplicate").Inc()
 		httputil.RespondJSON(w, http.StatusOK, map[string]string{"status": "duplicate", "delivery_id": deliveryID})
 		return
 	}
 
-	// Respond 200 immediately, dispatch pipeline async (GitHub requires < 10s response)
-	githubWebhookRequestsTotal.WithLabelValues("pull_request", payload.Action, "accepted").Inc()
-	httputil.RespondJSON(w, http.StatusOK, map[string]string{
-		"status":      "accepted",
-		"delivery_id": deliveryID,
-	})
+	// Opened: dispatch immediately — first review should be instant.
+	if action == domain.PROpened {
+		markSHAReviewed(prEvent.Repo, prEvent.PRNumber, prEvent.HeadSHA)
+		githubWebhookRequestsTotal.WithLabelValues("pull_request", payload.Action, "accepted").Inc()
+		httputil.RespondJSON(w, http.StatusOK, map[string]string{
+			"status":      "accepted",
+			"delivery_id": deliveryID,
+		})
+		go h.dispatchPRPipeline(prEvent)
+		return
+	}
 
-	go h.dispatchPRPipeline(prEvent)
+	// Synchronize: debounce — wait for a quiet window before reviewing.
+	// Each new push resets the timer so rapid pushes produce only one review.
+	prKey := fmt.Sprintf("%s#%d", prEvent.Repo, prEvent.PRNumber)
+
+	if existing, loaded := pendingReviews.Load(prKey); loaded {
+		pr := existing.(*pendingReview)
+		pr.timer.Stop()
+		pr.event = prEvent
+		pr.timer = time.AfterFunc(debounceWindow, func() {
+			h.fireDebounced(prKey)
+		})
+		pendingReviews.Store(prKey, pr)
+		slog.Info("debounce timer reset for PR",
+			"repo", prEvent.Repo, "pr", prEvent.PRNumber,
+			"new_sha", prEvent.HeadSHA, "window", debounceWindow)
+	} else {
+		pr := &pendingReview{event: prEvent}
+		pr.timer = time.AfterFunc(debounceWindow, func() {
+			h.fireDebounced(prKey)
+		})
+		pendingReviews.Store(prKey, pr)
+		slog.Info("debounce timer started for PR",
+			"repo", prEvent.Repo, "pr", prEvent.PRNumber,
+			"sha", prEvent.HeadSHA, "window", debounceWindow)
+	}
+
+	githubWebhookRequestsTotal.WithLabelValues("pull_request", payload.Action, "debounced").Inc()
+	httputil.RespondJSON(w, http.StatusOK, map[string]string{
+		"status":             "debounced",
+		"delivery_id":        deliveryID,
+		"will_review_after":  "15m",
+	})
 }
 
 func (h *GitHubWebhookHandler) handleIssueComment(w http.ResponseWriter, body []byte, deliveryID string) {
@@ -612,6 +658,31 @@ func (h *GitHubWebhookHandler) dispatchIssueImplementation(event domain.GitHubIs
 		"repo", event.Repo,
 		"issue", event.IssueNumber,
 	)
+}
+
+// fireDebounced is called when the debounce timer expires. It dispatches
+// the review using the latest event payload (most recent push SHA).
+func (h *GitHubWebhookHandler) fireDebounced(prKey string) {
+	val, loaded := pendingReviews.LoadAndDelete(prKey)
+	if !loaded {
+		return
+	}
+	pr := val.(*pendingReview)
+
+	// Final SHA dedup check — another path (e.g. /shipwright review) may have
+	// already reviewed this exact SHA while we were waiting.
+	if isDuplicatePRReview(pr.event.Repo, pr.event.PRNumber, pr.event.HeadSHA) {
+		slog.Info("debounce fired but SHA already reviewed, skipping",
+			"repo", pr.event.Repo, "pr", pr.event.PRNumber, "sha", pr.event.HeadSHA)
+		return
+	}
+
+	markSHAReviewed(pr.event.Repo, pr.event.PRNumber, pr.event.HeadSHA)
+
+	slog.Info("debounce timer fired, dispatching review",
+		"repo", pr.event.Repo, "pr", pr.event.PRNumber, "sha", pr.event.HeadSHA)
+
+	h.dispatchPRPipeline(pr.event)
 }
 
 func (h *GitHubWebhookHandler) dispatchPRPipeline(event domain.GitHubPREvent) {

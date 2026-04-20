@@ -445,7 +445,7 @@ class PgStore:
         finally:
             self._pool.putconn(conn)
 
-    def get_executions(self, skill_path: str | None = None, triggered_by: str | None = None) -> list[dict]:
+    def get_executions(self, skill_path: str | None = None, triggered_by: str | None = None, since: str | None = None) -> list[dict]:
         conn = self._pool.getconn()
         try:
             with conn.cursor(
@@ -459,6 +459,9 @@ class PgStore:
                 if triggered_by:
                     conditions.append("triggered_by = %s")
                     params.append(triggered_by)
+                if since:
+                    conditions.append("timestamp >= %s")
+                    params.append(since)
                 query = f"SELECT * FROM executions WHERE {' AND '.join(conditions)} ORDER BY timestamp DESC"
                 cur.execute(query, params)
                 return [self._deserialize_row(row) for row in cur.fetchall()]
