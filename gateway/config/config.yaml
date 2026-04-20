@@ -336,6 +336,7 @@ triggers:
           policy: "open"
         events:
           message: true
+          message_dm_only: true
           app_mention: true
           reaction: false
         commands:

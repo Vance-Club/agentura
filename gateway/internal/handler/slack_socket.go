@@ -122,6 +122,11 @@ func (m *SlackSocketManager) handleEventsAPI(app *config.SlackAppConfig, evtAPI 
 		if !m.isEventEnabled(app, "message") {
 			return
 		}
+		// message_dm_only: only process DMs, ignore all channel messages.
+		// Channel interactions must go through @mentions (app_mention event).
+		if app.Events.MessageDMOnly && !isDM(ev.ChannelType) {
+			return
+		}
 		// When app_mention is also enabled, skip channel messages that
 		// contain a bot @mention to avoid processing the same mention
 		// twice (Slack fires both message and app_mention events).
