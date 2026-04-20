@@ -134,7 +134,8 @@ type SlackChannelACL struct {
 
 // SlackEventConfig controls which event types are processed.
 type SlackEventConfig struct {
-	Message       bool `yaml:"message"`        // message.channels, message.im, etc.
+	Message       bool `yaml:"message"`         // message.channels, message.im, etc.
+	MessageDMOnly bool `yaml:"message_dm_only"` // when true, only process DM messages (ignore channel messages)
 	AppMention    bool `yaml:"app_mention"`     // @bot mentions
 	Reaction      bool `yaml:"reaction"`        // reaction_added, reaction_removed
 	MemberJoin    bool `yaml:"member_join"`     // member_joined_channel

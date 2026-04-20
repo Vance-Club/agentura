@@ -241,6 +241,13 @@ func (h *SlackWebhookHandler) handleEventCallback(w http.ResponseWriter, app *co
 			return
 		}
 
+		// message_dm_only: only process DMs, ignore all channel messages.
+		if event.Type == "message" && app.Events.MessageDMOnly && !isDM(event.ChannelType) {
+			slackWebhookRequestsTotal.WithLabelValues(app.Name, "ignored").Inc()
+			httputil.RespondJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": "message_dm_only"})
+			return
+		}
+
 		// Enforce DM policy
 		if isDM(event.ChannelType) {
 			if !h.isDMAllowed(app, event.User) {
