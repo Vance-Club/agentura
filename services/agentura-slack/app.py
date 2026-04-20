@@ -145,7 +145,8 @@ def handle_mention(event, say, client):
 
 @app.event("message")
 def handle_dm(event, say):
-    """Handle direct messages and channel messages with the 'ask' keyword."""
+    """Handle direct messages only. In channels the bot responds only to explicit
+    @mentions (see handle_mention) or slash commands — no keyword-based triggers."""
     # Ignore bot's own messages
     if event.get("bot_id"):
         return
@@ -153,26 +154,16 @@ def handle_dm(event, say):
     if event.get("subtype"):
         return
 
+    channel_type = event.get("channel_type", "")
+    if channel_type != "im":
+        # Channel message without an @mention — ignore. Users must tag the bot
+        # (handled by handle_mention) or use a slash command.
+        return
+
     text = (event.get("text") or "").strip()
     user_id = event.get("user", "")
-    channel_type = event.get("channel_type", "")
-
-    if channel_type == "im":
-        # DM — treat the whole message as a command
-        subcommand, args = _parse_command(text)
-        _dispatch(say, subcommand, args, full_text=text, user_id=user_id)
-
-    elif text.lower().startswith(("ask ", "ask:")):
-        # Channel message starting with "ask " or "ask:" — route to code review bot
-        question = re.sub(r"^ask[: ]+", "", text, flags=re.IGNORECASE).strip()
-        print(f"[ask-keyword] user={user_id} q={question[:80]}", flush=True)
-        _handle_question(say, question, user_id=user_id)
-
-    elif text.lower().startswith(("run ", "agentura run ")):
-        # Channel message starting with "run " or "agentura run "
-        skill = re.sub(r"^(agentura\s+)?run\s+", "", text, flags=re.IGNORECASE).strip()
-        print(f"[run-keyword] user={user_id} skill={skill}", flush=True)
-        _handle_run(say, skill)
+    subcommand, args = _parse_command(text)
+    _dispatch(say, subcommand, args, full_text=text, user_id=user_id)
 
 
 # ─── Slash command handler (if /agentura is configured) ────────────
