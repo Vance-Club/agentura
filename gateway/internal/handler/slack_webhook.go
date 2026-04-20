@@ -154,6 +154,11 @@ func applyEventDefaults(app *config.SlackAppConfig) {
 		app.Events.Message = true
 		app.Events.AppMention = true
 	}
+	// Default: only process DMs, not ambient channel messages (GR-033).
+	// Bots that need channel messages must explicitly set message_dm_only: false.
+	if app.Events.Message && !app.Events.MessageDMOnly {
+		app.Events.MessageDMOnly = true
+	}
 }
 
 // Handle processes POST /api/v1/webhooks/slack.
