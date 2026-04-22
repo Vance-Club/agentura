@@ -102,20 +102,37 @@ def _threaded_say(say, thread_ts: str | None):
 
 
 def _fetch_thread_context(client, channel: str, thread_ts: str, current_ts: str) -> str:
-    """Return the last few thread messages (excluding the triggering one) as context."""
+    """Return recent thread messages (excluding the triggering one) as context.
+
+    Includes the bot's own prior replies so multi-turn conversations retain
+    continuity — without them, follow-up questions like "who wrote it?" can't
+    resolve references from earlier bot answers. Each line is labelled with
+    the speaker so the LLM can parse turn-taking.
+    """
     try:
-        result = client.conversations_replies(channel=channel, ts=thread_ts, limit=20)
+        result = client.conversations_replies(channel=channel, ts=thread_ts, limit=30)
         messages = result.get("messages", [])
-        # Exclude the current triggering message and bot messages
-        context = [
-            m.get("text", "")
-            for m in messages
-            if m.get("ts") != current_ts and not m.get("bot_id") and m.get("text")
-        ]
-        if context:
-            joined = "\n".join(f"  • {m}" for m in context[-8:])
-            print(f"[thread] fetched {len(context)} context messages", flush=True)
-            return f"\n\n[Thread context:\n{joined}\n]"
+        ctx_lines: list[str] = []
+        for m in messages:
+            if m.get("ts") == current_ts:
+                continue
+            text = (m.get("text") or "").strip()
+            if not text:
+                continue
+            speaker = "codelens" if m.get("bot_id") else "user"
+            snippet = text[:400] + ("…" if len(text) > 400 else "")
+            ctx_lines.append(f"[{speaker}] {snippet}")
+        if ctx_lines:
+            kept = ctx_lines[-20:]
+            joined = "\n".join(kept)
+            print(
+                f"[thread] fetched {len(ctx_lines)} context messages, kept {len(kept)}",
+                flush=True,
+            )
+            return (
+                f"\n\n[Thread context (most recent {len(kept)} messages):\n"
+                f"{joined}\n]"
+            )
     except Exception as e:
         print(f"[thread] failed to fetch context: {e}", flush=True)
     return ""
