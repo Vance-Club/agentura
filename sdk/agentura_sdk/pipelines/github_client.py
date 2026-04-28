@@ -123,6 +123,75 @@ async def post_comment(
         return resp.json()
 
 
+async def upsert_comment(
+    repo: str,
+    pr_number: int,
+    body: str,
+    token: str | None = None,
+) -> dict:
+    """Post or update the Shipwright bot comment on a PR.
+
+    Finds the last comment by shipwright-crew[bot] and PATCHes it.
+    If no existing bot comment is found, POSTs a new one.
+    """
+    token = token or get_token()
+    comments = await get_pr_comments(repo, pr_number, token)
+
+    # Find the last comment by the bot
+    bot_comment = None
+    for c in comments:
+        user = c.get("user", {})
+        login = user.get("login", "")
+        if user.get("type") == "Bot" and "shipwright" in login.lower():
+            bot_comment = c
+            break  # comments are desc by date, first match is latest
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+        if bot_comment:
+            url = f"{GITHUB_API}/repos/{repo}/issues/comments/{bot_comment['id']}"
+            resp = await client.patch(url, headers=_headers(token), json={"body": body})
+            resp.raise_for_status()
+            logger.info("updated existing bot comment %s on %s#%s", bot_comment["id"], repo, pr_number)
+            return resp.json()
+        else:
+            url = f"{GITHUB_API}/repos/{repo}/issues/{pr_number}/comments"
+            resp = await client.post(url, headers=_headers(token), json={"body": body})
+            resp.raise_for_status()
+            logger.info("created new bot comment on %s#%s", repo, pr_number)
+            return resp.json()
+
+
+async def get_pr_reviews(
+    repo: str,
+    pr_number: int,
+    token: str | None = None,
+) -> list[dict]:
+    """Get all reviews on a PR (includes inline review comments)."""
+    token = token or get_token()
+    url = f"{GITHUB_API}/repos/{repo}/pulls/{pr_number}/reviews"
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+        resp = await client.get(url, headers=_headers(token), params={"per_page": 30})
+        resp.raise_for_status()
+        return resp.json()
+
+
+async def get_review_comments(
+    repo: str,
+    pr_number: int,
+    review_id: int,
+    token: str | None = None,
+) -> list[dict]:
+    """Get inline comments for a specific PR review."""
+    token = token or get_token()
+    url = f"{GITHUB_API}/repos/{repo}/pulls/{pr_number}/reviews/{review_id}/comments"
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+        resp = await client.get(url, headers=_headers(token), params={"per_page": 100})
+        resp.raise_for_status()
+        return resp.json()
+
+
 async def get_pr_comments(
     repo: str,
     pr_number: int,
