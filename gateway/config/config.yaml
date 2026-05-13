@@ -399,6 +399,45 @@ triggers:
             skill: "pm-query"
             extract: {"project_slug": "global-equities", "query": "{question}"}
             description: "Ask a question about GE project"
+      # --- Ops Genie: alert enrichment bot (Phase 0: silent observation) ---
+      - name: ops-genie
+        signing_secret: "${SLACK_OPS_SIGNING_SECRET}"
+        bot_token: "${SLACK_OPS_BOT_TOKEN}"
+        app_token: "${SLACK_OPS_APP_TOKEN}"
+        mode: "socket"
+        domain_scope: "platform"
+        allowed_skills: ["*"]
+        ack_reaction: "eyes"
+        events:
+          message: true
+          app_mention: true
+          reaction: true
+        watch_bots:
+          - bot_id: "${DATADOG_BOT_ID}"
+            skill: "alert-enricher"
+            channel: "${REMITTANCE_ALERTS_CHANNEL}"
+            pass_raw_text: true
+            output_channel: "${OPS_GENIE_PILOT_CHANNEL}"
+            description: "Enrich Datadog alerts (remittance)"
+          - bot_id: "${DATADOG_BOT_ID}"
+            skill: "alert-enricher"
+            channel: "${CORE_EX_ALERTS_CHANNEL}"
+            pass_raw_text: true
+            output_channel: "${OPS_GENIE_PILOT_CHANNEL}"
+            description: "Enrich Datadog alerts (core-ex)"
+          - bot_id: "${DATADOG_BOT_ID}"
+            skill: "alert-enricher"
+            channel: "${DEVOPS_PD_ALERTS_CHANNEL}"
+            pass_raw_text: true
+            output_channel: "${OPS_GENIE_PILOT_CHANNEL}"
+            description: "Enrich Datadog alerts (devops-pagerduty)"
+        commands:
+          - pattern: "status"
+            skill: "service-health"
+            description: "Service health overview"
+          - pattern: "brief me"
+            skill: "shift-briefer"
+            description: "On-call shift handoff summary"
 
 agents:
   - domain: growth
