@@ -131,6 +131,15 @@ func (m *SlackSocketManager) handleEventsAPI(app *config.SlackAppConfig, evtAPI 
 		// for DMs. Without this, any DM reply inside a thread would re-trigger
 		// the bot — which behaves like "remembering" the conversation and
 		// surprises users who only meant to chat.
+		//
+		// CONSTRAINT — the mention must be at the START of the message.
+		// `HasPrefix` is intentional, not a bug. Mid-sentence mentions like
+		// "hi <@Ubot>, can you explain this?" are dropped silently and the bot
+		// will NOT reply. This matches common slash-command / chat-bot UX where
+		// invocation must lead the message. If you change this to `Contains`,
+		// any message that incidentally @mentions the bot anywhere will trigger
+		// a reply, which is rarely what the author intended. Document any UX
+		// change here in GUARDRAILS.md (see GR-034).
 		if app.Events.ThreadMentionOnly {
 			isThreadReply := ev.ThreadTimeStamp != "" && ev.ThreadTimeStamp != ev.TimeStamp
 			hasBotMention := strings.HasPrefix(strings.TrimSpace(ev.Text), "<@")

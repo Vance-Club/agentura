@@ -257,6 +257,15 @@ func (h *SlackWebhookHandler) handleEventCallback(w http.ResponseWriter, app *co
 		// @mention, regardless of channel type (DM or channel). Prevents the
 		// bot from re-triggering on conversational follow-ups in threads
 		// where it previously replied.
+		//
+		// CONSTRAINT — the mention must be at the START of the message.
+		// `HasPrefix` is intentional, not a bug. Mid-sentence mentions like
+		// "hi <@Ubot>, can you explain this?" are dropped silently and the bot
+		// will NOT reply. This matches common slash-command / chat-bot UX where
+		// invocation must lead the message. If you change this to `Contains`,
+		// any message that incidentally @mentions the bot anywhere will trigger
+		// a reply, which is rarely what the author intended. Document any UX
+		// change here in GUARDRAILS.md (see GR-034).
 		if event.Type == "message" && app.Events.ThreadMentionOnly {
 			isThreadReply := event.ThreadTS != "" && event.ThreadTS != event.TS
 			hasBotMention := strings.HasPrefix(strings.TrimSpace(event.Text), "<@")
@@ -1202,6 +1211,20 @@ func findSplitPoint(text string, maxLen int) int {
 	return maxLen
 }
 
+// postSlackMessage posts text to a channel at top level (no thread). Long text
+// is split into multiple sequential top-level messages, each visible directly
+// in the channel feed. The `_part N/M_` prefix added by splitForSlack signals
+// continuity to readers.
+//
+// Why not thread parts 2..N under part 1: in a channel feed, threaded replies
+// are collapsed behind a "X replies" link. If we threaded the continuation,
+// part 1 would look like a truncated answer that readers easily miss; they'd
+// have to click into the thread to find the rest. Sequential top-level posts
+// keep every part in the main feed.
+//
+// Returns the timestamp of the FIRST part so callers that anchor future
+// thread replies (e.g. follow-ups) stay attached to where the conversation
+// started.
 func postSlackMessage(botToken, channel, text string) (string, error) {
 	if botToken == "" || isSlackSecretPlaceholder(botToken) {
 		return "", fmt.Errorf("bot token not configured")
@@ -1212,15 +1235,10 @@ func postSlackMessage(botToken, channel, text string) (string, error) {
 
 	var firstTS string
 	for i, part := range parts {
-		payload := map[string]string{
+		body, err := json.Marshal(map[string]string{
 			"channel": channel,
 			"text":    part,
-		}
-		// Parts 2..N attach to the first message's thread so they read as a series.
-		if i > 0 && firstTS != "" {
-			payload["thread_ts"] = firstTS
-		}
-		body, err := json.Marshal(payload)
+		})
 		if err != nil {
 			return firstTS, fmt.Errorf("marshaling slack message part %d: %w", i+1, err)
 		}

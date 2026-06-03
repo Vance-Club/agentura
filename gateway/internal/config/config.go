@@ -137,7 +137,7 @@ type SlackChannelACL struct {
 type SlackEventConfig struct {
 	Message           bool `yaml:"message"`             // message.channels, message.im, etc.
 	MessageDMOnly     bool `yaml:"message_dm_only"`     // when true, only process DM messages (ignore channel messages)
-	ThreadMentionOnly bool `yaml:"thread_mention_only"` // when true, in-thread replies require an explicit @mention (applies to DMs and channels)
+	ThreadMentionOnly bool `yaml:"thread_mention_only"` // when true, in-thread replies require an explicit @mention at the START of the message (applies to DMs and channels). Mid-sentence mentions are dropped silently — see GR-034.
 	AppMention        bool `yaml:"app_mention"`         // @bot mentions
 	Reaction          bool `yaml:"reaction"`            // reaction_added, reaction_removed
 	MemberJoin        bool `yaml:"member_join"`         // member_joined_channel
