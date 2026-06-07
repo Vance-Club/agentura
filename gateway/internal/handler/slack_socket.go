@@ -127,6 +127,26 @@ func (m *SlackSocketManager) handleEventsAPI(app *config.SlackAppConfig, evtAPI 
 		if app.Events.MessageDMOnly && !isDM(ev.ChannelType) {
 			return
 		}
+		// thread_mention_only: in threads, require an explicit @mention even
+		// for DMs. Without this, any DM reply inside a thread would re-trigger
+		// the bot — which behaves like "remembering" the conversation and
+		// surprises users who only meant to chat.
+		//
+		// CONSTRAINT — the mention must be at the START of the message.
+		// `HasPrefix` is intentional, not a bug. Mid-sentence mentions like
+		// "hi <@Ubot>, can you explain this?" are dropped silently and the bot
+		// will NOT reply. This matches common slash-command / chat-bot UX where
+		// invocation must lead the message. If you change this to `Contains`,
+		// any message that incidentally @mentions the bot anywhere will trigger
+		// a reply, which is rarely what the author intended. Document any UX
+		// change here in GUARDRAILS.md (see GR-034).
+		if app.Events.ThreadMentionOnly {
+			isThreadReply := ev.ThreadTimeStamp != "" && ev.ThreadTimeStamp != ev.TimeStamp
+			hasBotMention := strings.HasPrefix(strings.TrimSpace(ev.Text), "<@")
+			if isThreadReply && !hasBotMention {
+				return
+			}
+		}
 		// When app_mention is also enabled, skip channel messages that
 		// contain a bot @mention to avoid processing the same mention
 		// twice (Slack fires both message and app_mention events).
@@ -237,6 +257,8 @@ func (m *SlackSocketManager) handleSocketMessage(app *config.SlackAppConfig, cha
 		"user", user,
 		"command", cmd.Action,
 		"is_dm", isDM(channelType),
+		"thread_ts", threadTS,
+		"ts", ts,
 	)
 
 	slackWebhookRequestsTotal.WithLabelValues(app.Name, "accepted").Inc()
@@ -254,9 +276,19 @@ func (m *SlackSocketManager) handleSocketMessage(app *config.SlackAppConfig, cha
 		go addSlackReaction(app.BotToken, channel, ts, typingReaction)
 	}
 
+	// Fetch full thread history from Slack so multi-turn replies have proper
+	// context. Only worth doing when this message is a reply inside an existing
+	// thread (threadTS != "" and != ts). Done synchronously before dispatch so
+	// the skill sees it; cost is one Slack API call (~200ms) bounded by a 5s
+	// timeout, and any failure returns "" — never blocks dispatch.
+	var threadHistory string
+	if threadTS != "" && threadTS != ts {
+		threadHistory = fetchSlackThreadContext(app.BotToken, channel, threadTS, ts)
+	}
+
 	// Dispatch async
 	go func() {
-		result, finalCmd := m.dispatchAndFormat(app, channel, user, cmd, threadTS, replyTS)
+		result, finalCmd := m.dispatchAndFormat(app, channel, user, cmd, threadTS, replyTS, threadHistory)
 
 		if typingReaction != "" {
 			removeSlackReaction(app.BotToken, channel, ts, typingReaction)
@@ -308,32 +340,15 @@ func (m *SlackSocketManager) handleSocketMessage(app *config.SlackAppConfig, cha
 
 // ---------- Dispatch (reuses same logic as HTTP handler) ----------
 
-func (m *SlackSocketManager) dispatchAndFormat(app *config.SlackAppConfig, channel, user string, cmd slackCommand, origThreadTS, replyTS string) (string, slackCommand) {
+func (m *SlackSocketManager) dispatchAndFormat(app *config.SlackAppConfig, channel, user string, cmd slackCommand, origThreadTS, replyTS, threadHistory string) (string, slackCommand) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	// Thread continuity: thread replies skip triage, reuse previous skill
-	if origThreadTS != "" && cmd.Action == "auto" {
-		if entry := lookupThread(app.Name, channel, origThreadTS); entry != nil {
-			cmd = slackCommand{
-				Action: "run",
-				Target: entry.skill,
-				Input: map[string]any{
-					"text": cmd.Text,
-					"thread_context": map[string]any{
-						"previous_output": entry.lastOutput,
-						"turn":            entry.turn + 1,
-					},
-				},
-				Text:   cmd.Text,
-				UserID: cmd.UserID,
-			}
-			for k, v := range entry.entities {
-				cmd.Input[k] = v
-			}
-			slog.Info("thread continuity: reusing skill", "app", app.Name, "skill", entry.skill, "turn", entry.turn+1)
-		}
-	}
+	// Every triggering message now goes through normal alias / triage routing.
+	// (We previously skipped triage by reusing the prior skill via threadRegistry,
+	// but that conflated "we know the skill" with "the user wants the bot
+	// involved at all" — see thread_mention_only.) The registry is still kept
+	// for reaction-feedback attribution; only the dispatch shortcut is removed.
 
 	// For auto commands: try command aliases first (highest priority),
 	// then fall back to domain triage if no alias matches.
@@ -350,7 +365,7 @@ func (m *SlackSocketManager) dispatchAndFormat(app *config.SlackAppConfig, chann
 
 	switch cmd.Action {
 	case "run":
-		result, err = m.dispatchSkill(ctx, app, cmd)
+		result, err = m.dispatchSkill(ctx, app, cmd, threadHistory)
 	case "pipeline":
 		result, err = m.dispatchPipeline(ctx, app, cmd)
 	case "skills":
@@ -359,7 +374,7 @@ func (m *SlackSocketManager) dispatchAndFormat(app *config.SlackAppConfig, chann
 		result = m.helpText(app)
 	default:
 		var routedCmd slackCommand
-		result, routedCmd, err = m.dispatchAuto(ctx, app, cmd)
+		result, routedCmd, err = m.dispatchAuto(ctx, app, cmd, threadHistory)
 		if routedCmd.Target != "" {
 			cmd = routedCmd
 		}
@@ -373,7 +388,7 @@ func (m *SlackSocketManager) dispatchAndFormat(app *config.SlackAppConfig, chann
 	return result, cmd
 }
 
-func (m *SlackSocketManager) dispatchSkill(ctx context.Context, app *config.SlackAppConfig, cmd slackCommand) (string, error) {
+func (m *SlackSocketManager) dispatchSkill(ctx context.Context, app *config.SlackAppConfig, cmd slackCommand, threadHistory string) (string, error) {
 	if cmd.Target == "" {
 		return "", fmt.Errorf("usage: `run <domain/skill> [json_input]`")
 	}
@@ -393,6 +408,17 @@ func (m *SlackSocketManager) dispatchSkill(ctx context.Context, app *config.Slac
 	inputData := cmd.Input
 	if inputData == nil {
 		inputData = map[string]any{}
+	}
+
+	// Inject Slack-fetched thread history. Merges with any thread_context the
+	// registry already populated (previous_output, turn) instead of clobbering.
+	if threadHistory != "" {
+		tc, _ := inputData["thread_context"].(map[string]any)
+		if tc == nil {
+			tc = make(map[string]any)
+		}
+		tc["history"] = threadHistory
+		inputData["thread_context"] = tc
 	}
 
 	resp, err := m.executor.Execute(ctx, skillDomain, skillName, executor.ExecuteRequest{InputData: inputData, UserID: cmd.UserID})
@@ -455,7 +481,7 @@ func (m *SlackSocketManager) listSkills(ctx context.Context, app *config.SlackAp
 	return sb.String(), nil
 }
 
-func (m *SlackSocketManager) dispatchAuto(ctx context.Context, app *config.SlackAppConfig, cmd slackCommand) (string, slackCommand, error) {
+func (m *SlackSocketManager) dispatchAuto(ctx context.Context, app *config.SlackAppConfig, cmd slackCommand, threadHistory string) (string, slackCommand, error) {
 	if app.DomainScope == "" {
 		return m.helpText(app) + "\n\n_Type `help` to see available commands._", cmd, nil
 	}
@@ -498,7 +524,7 @@ func (m *SlackSocketManager) dispatchAuto(ctx context.Context, app *config.Slack
 		routeInput[k] = v
 	}
 	routedCmd := slackCommand{Action: "run", Target: routeTo, Input: routeInput, Text: cmd.Text, UserID: cmd.UserID}
-	result, err := m.dispatchSkill(ctx, app, routedCmd)
+	result, err := m.dispatchSkill(ctx, app, routedCmd, threadHistory)
 	if err != nil {
 		slog.Error("dispatchAuto: routed skill failed", "skill", routeTo, "error", err)
 		return "", routedCmd, err
@@ -927,7 +953,7 @@ func (m *SlackSocketManager) handleWatchBotMessage(app *config.SlackAppConfig, w
 		Text: ev.Text,
 	}
 
-	result, _ := m.dispatchAndFormat(app, ev.Channel, "", cmd, "", ev.TimeStamp)
+	result, _ := m.dispatchAndFormat(app, ev.Channel, "", cmd, "", ev.TimeStamp, "")
 
 	// Reply in thread under the bot's original message
 	if blocks, fallback, ok := tryParseRichOutput(result); ok {

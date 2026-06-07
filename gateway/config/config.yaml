@@ -337,6 +337,7 @@ triggers:
         events:
           message: true
           message_dm_only: true
+          thread_mention_only: true
           app_mention: true
           reaction: false
         commands:
@@ -352,6 +353,7 @@ triggers:
             skill: "code-review-bot"
             extract: {"question": "{question}", "role": "product_manager"}
             description: "Ask a PM-friendly question about the codebase"
+            default: true   # any unprefixed question routes here
       - name: ge
         signing_secret: "${SLACK_GE_SIGNING_SECRET}"
         bot_token: "${SLACK_GE_BOT_TOKEN}"
